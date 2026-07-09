@@ -39,6 +39,10 @@ func (q *quickJSAdapter) Allocate(ctx context.Context, size uint32) (uint32, err
 		return 0, fmt.Errorf("failed to call allocate: %w", err)
 	}
 
+	if len(results) == 0 {
+		return 0, fmt.Errorf("allocate returned no results")
+	}
+
 	return uint32(results[0]), nil
 }
 
@@ -50,13 +54,17 @@ func (q *quickJSAdapter) Eval(ctx context.Context, code []byte) ([]byte, error) 
 		return nil, fmt.Errorf("allocate failed: %w", err)
 	}
 
-	if q.mod.Memory().Write(ptr, code) {
+	if !q.mod.Memory().Write(ptr, code) {
 		return nil, fmt.Errorf("failed to write code to wasm memory out of bounds")
 	}
 
 	results, err := q.evalFunc.Call(ctx, uint64(ptr), uint64(codeLen))
 	if err != nil {
 		return nil, fmt.Errorf("eval execution failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("eval returned no results")
 	}
 
 	retVal := results[0]
