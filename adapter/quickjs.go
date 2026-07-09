@@ -15,7 +15,7 @@ type quickJSAdapter struct {
 
 var _ (Adapter) = (*quickJSAdapter)(nil)
 
-func NewJSAdapter(mod api.Module) (*quickJSAdapter, error) {
+func NewQuickJSAdapter(mod api.Module) (*quickJSAdapter, error) {
 	allocFunc := mod.ExportedFunction("allocate")
 	if allocFunc == nil {
 		return nil, fmt.Errorf("allocate function not found")
