@@ -52,7 +52,7 @@ func Eval(ctx context.Context, mod api.Module, code []byte) (sango.Result, error
 		return sango.Result{}, fmt.Errorf("allocate returned no results")
 	}
 	ptr := uint32(ptrRes[0])
-	defer dealloc.Call(ctx, uint64(ptr), uint64(codeLen)) //nolint:errcheck
+	defer dealloc.Call(ctx, uint64(ptr), uint64(codeLen))
 
 	if !mod.Memory().Write(ptr, code) {
 		return sango.Result{}, fmt.Errorf("write code to wasm memory: out of bounds")
@@ -74,8 +74,8 @@ func Eval(ctx context.Context, mod api.Module, code []byte) (sango.Result, error
 		return sango.Result{}, fmt.Errorf("read result from wasm memory: out of bounds")
 	}
 	buf := make([]byte, retLen)
-	copy(buf, raw)                                          // Read は線形メモリへの参照。dealloc 前に必ずコピー
-	defer dealloc.Call(ctx, uint64(retPtr), uint64(retLen)) //nolint:errcheck
+	copy(buf, raw)
+	defer dealloc.Call(ctx, uint64(retPtr), uint64(retLen))
 
 	if len(buf) == 0 {
 		return sango.Result{}, fmt.Errorf("guest returned empty result (missing tag byte)")
@@ -95,5 +95,6 @@ func exported(mod api.Module, name string) (api.Function, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("exported function %q not found", name)
 	}
+
 	return fn, nil
 }
