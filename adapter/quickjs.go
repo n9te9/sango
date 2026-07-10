@@ -4,16 +4,11 @@ import (
 	"context"
 
 	"github.com/n9te9/sango"
-	"github.com/n9te9/sango/adapter/cabi"
+	"github.com/n9te9/sango/internal/cabi"
 	"github.com/tetratelabs/wazero/api"
 )
 
 type quickJSAdapter struct{}
-
-const (
-	tagOK    = 0x00
-	tagError = 0x01
-)
 
 var _ (sango.Adapter) = (*quickJSAdapter)(nil)
 

@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/n9te9/sango"
-	"github.com/n9te9/sango/adapter/cabi"
+	"github.com/n9te9/sango/internal/cabi"
 	"github.com/tetratelabs/wazero/api"
 )
 
