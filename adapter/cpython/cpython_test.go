@@ -1,4 +1,4 @@
-package adapter_test
+package cpython_test
 
 import (
 	"context"
@@ -7,20 +7,46 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/n9te9/sango"
-	"github.com/n9te9/sango/adapter"
+	"github.com/n9te9/sango/adapter/cpython"
 	"github.com/tetratelabs/wazero/api"
 )
 
-func TestQuickJS_ID(t *testing.T) {
+type fakeMemory struct {
+	api.Memory
+	data []byte
+}
+
+type fakeFunc struct {
+	api.Function
+	fn func(ctx context.Context, params []uint64) ([]uint64, error)
+}
+
+func (f *fakeFunc) Call(ctx context.Context, params ...uint64) ([]uint64, error) {
+	return f.fn(ctx, params)
+}
+
+type fakeModule struct {
+	api.Module
+	mem   *fakeMemory
+	funcs map[string]api.Function
+}
+
+func (m *fakeModule) Memory() api.Memory { return m.mem }
+
+func (m *fakeModule) ExportedFunction(name string) api.Function {
+	return m.funcs[name]
+}
+
+func TestCPython_ID(t *testing.T) {
 	tests := []struct {
 		name    string
 		adapter sango.Adapter
 		want    string
 	}{
 		{
-			name:    "ok: ID returned \"quickjs\"",
-			adapter: adapter.QuickJS(),
-			want:    "quickjs",
+			name:    "ok: ID returned \"cpython\"",
+			adapter: cpython.CPython(),
+			want:    "cpython",
 		},
 	}
 
@@ -36,7 +62,26 @@ func TestQuickJS_ID(t *testing.T) {
 	}
 }
 
-func TestQuickJS_Initialize(t *testing.T) {
+func (m *fakeMemory) Size() uint32 { return uint32(len(m.data)) }
+
+func (m *fakeMemory) Read(offset, count uint32) ([]byte, bool) {
+	if uint64(offset)+uint64(count) > uint64(len(m.data)) {
+		return nil, false
+	}
+
+	return m.data[offset : offset+count], true
+}
+
+func (m *fakeMemory) Write(offset uint32, v []byte) bool {
+	if uint64(offset)+uint64(len(v)) > uint64(len(m.data)) {
+		return false
+	}
+
+	copy(m.data[offset:], v)
+	return true
+}
+
+func TestCPython_Initialize(t *testing.T) {
 	tests := []struct {
 		name    string
 		adapter sango.Adapter
@@ -45,7 +90,7 @@ func TestQuickJS_Initialize(t *testing.T) {
 	}{
 		{
 			name:    "ok: Initialize success and return nil",
-			adapter: adapter.QuickJS(),
+			adapter: cpython.CPython(),
 			mod: func() api.Module {
 				mem := &fakeMemory{data: make([]byte, 64*1024)}
 				mod := &fakeModule{mem: mem, funcs: map[string]api.Function{}}
@@ -59,7 +104,7 @@ func TestQuickJS_Initialize(t *testing.T) {
 		},
 		{
 			name:    "fail: Initialize fail and return error",
-			adapter: adapter.QuickJS(),
+			adapter: cpython.CPython(),
 			mod: func() api.Module {
 				mem := &fakeMemory{data: make([]byte, 64*1024)}
 				mod := &fakeModule{mem: mem, funcs: map[string]api.Function{}}
@@ -98,7 +143,7 @@ func TestQuickJS_Initialize(t *testing.T) {
 	}
 }
 
-func TestQuickJS_Eval(t *testing.T) {
+func TestCPython_Eval(t *testing.T) {
 	tests := []struct {
 		name    string
 		adapter sango.Adapter
@@ -107,7 +152,7 @@ func TestQuickJS_Eval(t *testing.T) {
 	}{
 		{
 			name:    "ok: eval success and return nil",
-			adapter: adapter.QuickJS(),
+			adapter: cpython.CPython(),
 			mod: func() api.Module {
 				mem := &fakeMemory{data: make([]byte, 64*1024)}
 				mod := &fakeModule{mem: mem, funcs: map[string]api.Function{}}
@@ -134,7 +179,7 @@ func TestQuickJS_Eval(t *testing.T) {
 		},
 		{
 			name:    "fail: eval fail and return error",
-			adapter: adapter.QuickJS(),
+			adapter: cpython.CPython(),
 			mod: func() api.Module {
 				mem := &fakeMemory{data: make([]byte, 64*1024)}
 				mod := &fakeModule{mem: mem, funcs: map[string]api.Function{}}
