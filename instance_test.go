@@ -83,7 +83,3 @@ func TestInstance_Eval(t *testing.T) {
 		})
 	}
 }
-
-func TestInstance_Release(t *testing.T) {
-
-}
