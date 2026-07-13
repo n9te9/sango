@@ -61,7 +61,7 @@ OUT      := ../../adapter/quickjs/quickjs.wasm
 
 CC := $(WASI_SDK)/bin/clang
 
-CFLAGS := --target=wasm32-wasi -O2 -I$(QJS_DIR) \
+CFLAGS := --target=wasm32-wasip1 -O2 -I$(QJS_DIR) \
 	-D_GNU_SOURCE -DCONFIG_VERSION='"sango"'
 
 LDFLAGS := -mexec-model=reactor \
