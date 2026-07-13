@@ -59,7 +59,7 @@ QJS_REF  ?= v0.10.1
 QJS_DIR  := build/quickjs
 OUT      := ../../adapter/quickjs/quickjs.wasm
 
-CC := $(WASI_SDK)/clang
+CC := $(WASI_SDK)/bin/clang
 
 CFLAGS := --target=wasm32-wasi -O2 -I$(QJS_DIR) \
 	-D_GNU_SOURCE -DCONFIG_VERSION='"sango"'
