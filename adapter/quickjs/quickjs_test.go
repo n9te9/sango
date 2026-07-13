@@ -1,6 +1,7 @@
 package quickjs_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -120,6 +121,143 @@ func TestQuickJS_Initialize(t *testing.T) {
 				if err == nil {
 					t.Fatalf("error expected %v, but got nil\n", tt.wantErr)
 				}
+			}
+		})
+	}
+}
+
+func (m *fakeMemory) Size() uint32 { return uint32(len(m.data)) }
+
+func (m *fakeMemory) Read(offset, count uint32) ([]byte, bool) {
+	if uint64(offset)+uint64(count) > uint64(len(m.data)) {
+		return nil, false
+	}
+
+	return m.data[offset : offset+count], true
+}
+
+func (m *fakeMemory) Write(offset uint32, v []byte) bool {
+	if uint64(offset)+uint64(len(v)) > uint64(len(m.data)) {
+		return false
+	}
+
+	copy(m.data[offset:], v)
+	return true
+}
+
+type deallocCall struct{ ptr, size uint32 }
+
+type guest struct {
+	mod      *fakeModule
+	next     uint32
+	deallocs []deallocCall
+	evalFn   func(code []byte) ([]byte, error)
+}
+
+const heapBase = 1024
+
+func newGuest(evalFn func(code []byte) ([]byte, error)) *guest {
+	g := &guest{
+		next:   heapBase,
+		evalFn: evalFn,
+	}
+	mem := &fakeMemory{data: make([]byte, 64*1024)}
+	g.mod = &fakeModule{mem: mem, funcs: map[string]api.Function{}}
+
+	g.mod.funcs["allocate"] = &fakeFunc{
+		fn: func(_ context.Context, p []uint64) ([]uint64, error) {
+			ptr := g.next
+			g.next += uint32(p[0])
+			return []uint64{uint64(ptr)}, nil
+		},
+	}
+	g.mod.funcs["deallocate"] = &fakeFunc{fn: func(_ context.Context, p []uint64) ([]uint64, error) {
+		g.deallocs = append(g.deallocs, deallocCall{uint32(p[0]), uint32(p[1])})
+		return nil, nil
+	}}
+	g.mod.funcs["initialize"] = &fakeFunc{fn: func(_ context.Context, p []uint64) ([]uint64, error) {
+		return []uint64{0}, nil
+	}}
+	g.mod.funcs["eval"] = &fakeFunc{fn: func(_ context.Context, p []uint64) ([]uint64, error) {
+		ptr, length := uint32(p[0]), uint32(p[1])
+		code, _ := mem.Read(ptr, length)
+		out, err := g.evalFn(bytes.Clone(code))
+		if err != nil {
+			return nil, err
+		}
+		outPtr := g.next
+		g.next += uint32(len(out))
+		copy(mem.data[outPtr:], out)
+		return []uint64{uint64(outPtr)<<32 | uint64(uint32(len(out)))}, nil
+	}}
+
+	return g
+}
+
+func TestQuickJS_Eval(t *testing.T) {
+	tests := []struct {
+		name    string
+		adapter sango.Adapter
+		mod     func(ctx context.Context) api.Module
+		code    []byte
+		want    sango.Result
+		wantErr error
+	}{
+		{
+
+			name:    "ok: Eval success and return error is nil",
+			adapter: quickjs.QuickJS(),
+			mod: func(ctx context.Context) api.Module {
+				evalFn := func(code []byte) ([]byte, error) {
+					return append([]byte{0x00}, "hogehoge"...), nil
+				}
+				return newGuest(evalFn).mod
+			},
+			code: []byte(``),
+			want: sango.Result{
+				Value: []byte(`hogehoge`),
+				Err:   nil,
+			},
+			wantErr: nil,
+		},
+		{
+			name:    "fail: Initialize fail and return error",
+			adapter: quickjs.QuickJS(),
+			mod: func(ctx context.Context) api.Module {
+				evalFn := func(code []byte) ([]byte, error) {
+					return nil, errors.New("occured an error")
+				}
+				return newGuest(evalFn).mod
+			},
+			code:    []byte(``),
+			wantErr: errors.New("eval call failed: occured an error"),
+		},
+	}
+
+	t.Parallel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tt.adapter.Eval(t.Context(), tt.mod(t.Context()), tt.code)
+			if err != nil {
+				if tt.wantErr == nil {
+					t.Fatalf("error expected nil, but got %v\n", err)
+				}
+
+				if err.Error() != tt.wantErr.Error() {
+					t.Fatalf("error expected %v, but got %v\n", tt.wantErr, err)
+				}
+			}
+
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatalf("error expected %v, but got nil\n", tt.wantErr)
+				}
+			}
+
+			if d := cmp.Diff(got, tt.want); d != "" {
+				t.Fatal(d)
 			}
 		})
 	}
