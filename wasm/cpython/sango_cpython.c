@@ -56,7 +56,7 @@ static uint64_t pack_pyerror(void) {
     }
     Py_XDECREF(type);
     Py_XDECREF(val);
-    Py_DECREF(tb);
+    Py_XDECREF(tb);
     PyErr_Clear();
     return out;
 }
