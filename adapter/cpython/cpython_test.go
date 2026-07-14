@@ -261,3 +261,101 @@ func TestCPython_Eval(t *testing.T) {
 		})
 	}
 }
+
+func TestRealWasm_OneshotAcquire(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), cpython.WithStdlib())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	res, err := inst.Eval(t.Context(), []byte(`1 + 1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !res.OK() || string(res.Value) != "2" {
+		t.Fatalf("got %q / %v", res.Value, res.Err)
+	}
+
+	t.Logf("got %q", res.Value)
+}
+
+func TestRealWasm_Fork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), cpython.WithStdlib())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	ctx := t.Context()
+
+	inst, err := rt.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Eval(ctx, []byte(`x = 40`))
+	snap, _ := rt.Snapshot(inst)
+
+	fork, _ := rt.Restore(ctx, snap)
+	fork.Eval(ctx, []byte(`x = -999`))
+
+	res1, _ := fork.Eval(ctx, []byte(`x`))
+	fork.Release()
+
+	if !res1.OK() || string(res1.Value) != "-999" {
+		t.Fatalf("got %q / %v", res1.Value, res1.Err)
+	}
+
+	t.Logf("got %q", res1.Value)
+
+	res2, err := inst.Eval(ctx, []byte(`x`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res2.OK() || string(res2.Value) != "40" {
+		t.Fatalf("fork mutated the original: got %q / %v", res2.Value, res2.Err)
+	}
+
+	closureSrc := `
+def _make_counter():
+    n = [0]
+    def inc():
+        n[0] += 1
+        return n[0]
+    return inc
+f = _make_counter()
+`
+	if r, _ := inst.Eval(ctx, []byte(closureSrc)); !r.OK() {
+		t.Fatalf("define closure: %v", r.Err)
+	}
+	if r, _ := inst.Eval(ctx, []byte(`f()`)); string(r.Value) != "1" {
+		t.Fatalf("closure call 1: got %q", r.Value)
+	}
+	snap2, _ := rt.Snapshot(inst)
+	fork2, _ := rt.Restore(ctx, snap2)
+	r, _ := fork2.Eval(ctx, []byte(`f()`))
+	if string(r.Value) != "2" {
+		t.Fatalf("closure survived fork? got %q", r.Value)
+	}
+	fork2.Release()
+	if r, _ := inst.Eval(ctx, []byte(`f()`)); string(r.Value) != "2" {
+		t.Fatalf("fork leaked into original: got %q", r.Value)
+	}
+
+	t.Logf("got %q", r.Value)
+}

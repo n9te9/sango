@@ -12,11 +12,12 @@ import (
 )
 
 type Runtime struct {
-	wazeroRT   wazero.Runtime
-	compiled   wazero.CompiledModule
-	adapter    Adapter
-	moduleHash [32]byte
-	closed     atomic.Bool
+	wazeroRT        wazero.Runtime
+	compiled        wazero.CompiledModule
+	adapter         Adapter
+	moduleHash      [32]byte
+	closed          atomic.Bool
+	moduleConfigMod func(wazero.ModuleConfig) wazero.ModuleConfig
 
 	golden Snapshot
 	warm   chan *Instance
@@ -25,13 +26,21 @@ type Runtime struct {
 type Option func(*config)
 
 type config struct {
-	poolSize int
-	wasi     bool
+	poolSize        int
+	wasi            bool
+	moduleConfigMod func(wazero.ModuleConfig) wazero.ModuleConfig
 }
 
 func WithPoolSize(n int) Option { return func(c *config) { c.poolSize = n } }
 
 func WithWASI() Option { return func(c *config) { c.wasi = true } }
+
+// WithModuleConfigModifier registers a hook that lets an adapter customise the
+// wazero ModuleConfig used when a guest instance is (re)instantiated (e.g. to
+// attach an FSConfig for preopened directories).
+func WithModuleConfigModifier(f func(wazero.ModuleConfig) wazero.ModuleConfig) Option {
+	return func(c *config) { c.moduleConfigMod = f }
+}
 
 func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option) (*Runtime, error) {
 	cfg := &config{}
@@ -52,11 +61,12 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 	}
 
 	rt := &Runtime{
-		wazeroRT:   wrt,
-		compiled:   compiled,
-		adapter:    adapter,
-		moduleHash: sha256.Sum256(wasmBinary),
-		warm:       make(chan *Instance, max(cfg.poolSize, 1)),
+		wazeroRT:        wrt,
+		compiled:        compiled,
+		adapter:         adapter,
+		moduleHash:      sha256.Sum256(wasmBinary),
+		moduleConfigMod: cfg.moduleConfigMod,
+		warm:            make(chan *Instance, max(cfg.poolSize, 1)),
 	}
 
 	seed, err := rt.instantiate(ctx)
@@ -177,8 +187,11 @@ func (r *Runtime) instantiate(ctx context.Context) (*Instance, error) {
 	if r.closed.Load() {
 		return nil, errors.New("runtime is already closed")
 	}
-	mod, err := r.wazeroRT.InstantiateModule(ctx, r.compiled,
-		wazero.NewModuleConfig().WithName("").WithStartFunctions())
+	modCfg := wazero.NewModuleConfig().WithName("").WithStartFunctions()
+	if r.moduleConfigMod != nil {
+		modCfg = r.moduleConfigMod(modCfg)
+	}
+	mod, err := r.wazeroRT.InstantiateModule(ctx, r.compiled, modCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sango: instantiate: %w", err)
 	}
