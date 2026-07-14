@@ -2,11 +2,19 @@ package quickjs
 
 import (
 	"context"
+	_ "embed"
 
 	"github.com/n9te9/sango"
 	"github.com/n9te9/sango/internal/cabi"
 	"github.com/tetratelabs/wazero/api"
 )
+
+//go:embed quickjs.wasm
+var wasmBinary []byte
+
+// Wasm returns the embedded QuickJS wasm binary. Callers pass it to
+// sango.New to construct a Runtime.
+func Wasm() []byte { return wasmBinary }
 
 type quickJSAdapter struct{}
 
