@@ -266,8 +266,11 @@ func TestRealWasm_OneshotAcquire(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip real wasm test in -short mode")
 	}
-
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), cpython.WithStdlib())
+	stdlib, err := cpython.WithStdlib()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), stdlib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +299,11 @@ func TestRealWasm_Fork(t *testing.T) {
 		t.Skip("skip real wasm test in -short mode")
 	}
 
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), cpython.WithStdlib())
+	stdlib, err := cpython.WithStdlib()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), stdlib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,12 +316,21 @@ func TestRealWasm_Fork(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.Eval(ctx, []byte(`x = 40`))
-	snap, _ := rt.Snapshot(inst)
+	snap, err := rt.Snapshot(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	fork, _ := rt.Restore(ctx, snap)
+	fork, err := rt.Restore(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fork.Eval(ctx, []byte(`x = -999`))
 
-	res1, _ := fork.Eval(ctx, []byte(`x`))
+	res1, err := fork.Eval(ctx, []byte(`x`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	fork.Release()
 
 	if !res1.OK() || string(res1.Value) != "-999" {
@@ -346,9 +362,18 @@ f = _make_counter()
 	if r, _ := inst.Eval(ctx, []byte(`f()`)); string(r.Value) != "1" {
 		t.Fatalf("closure call 1: got %q", r.Value)
 	}
-	snap2, _ := rt.Snapshot(inst)
-	fork2, _ := rt.Restore(ctx, snap2)
-	r, _ := fork2.Eval(ctx, []byte(`f()`))
+	snap2, err := rt.Snapshot(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork2, err := rt.Restore(ctx, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fork2.Eval(ctx, []byte(`f()`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(r.Value) != "2" {
 		t.Fatalf("closure survived fork? got %q", r.Value)
 	}
@@ -357,5 +382,27 @@ f = _make_counter()
 		t.Fatalf("fork leaked into original: got %q", r.Value)
 	}
 
+	t.Logf("got %q", r.Value)
+	fork3, err := rt.Restore(ctx, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fork3.Release()
+
+	r, err = fork3.Eval(ctx, []byte(`import json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.OK() {
+		t.Fatalf("import after fork failed: %v", r.Err)
+	}
+
+	r, err = fork3.Eval(ctx, []byte(`json.dumps({"a": 1})`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.OK() || string(r.Value) != `'{"a": 1}'` {
+		t.Fatalf("json.dumps after fork: got %q / %v", r.Value, r.Err)
+	}
 	t.Logf("got %q", r.Value)
 }

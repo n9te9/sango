@@ -36,14 +36,14 @@ func Wasm() []byte { return wasmBinary }
 // WithStdlib returns a sango.Option that mounts the embedded Python standard
 // library zip as a read-only preopen inside the guest at the path expected by
 // sango_cpython.c. It must be used together with sango.WithWASI.
-func WithStdlib() sango.Option {
+func WithStdlib() (sango.Option, error) {
 	zr, err := zip.NewReader(bytes.NewReader(stdlibZip), int64(len(stdlibZip)))
 	if err != nil {
-		panic(fmt.Errorf("cpython: open embedded stdlib zip: %w", err))
+		return nil, fmt.Errorf("cpython: open embedded stdlib zip: %w", err)
 	}
 	return sango.WithModuleConfigModifier(func(c wazero.ModuleConfig) wazero.ModuleConfig {
 		return c.WithFSConfig(wazero.NewFSConfig().WithFSMount(zr, stdlibGuestPath))
-	})
+	}), nil
 }
 
 func (c *cpythonAdapter) ID() string { return "cpython" }
