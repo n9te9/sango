@@ -3,9 +3,9 @@
 #include <string.h>
 #include <wchar.h>
 
-
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "sango_run.h"
 
 #define TAG_OK    0x00
 #define TAG_ERROR 0x01
@@ -90,6 +90,13 @@ uint32_t initialize(void) {
 
     g_globals = PyModule_GetDict(main_mod);
     Py_INCREF(g_globals);
+
+    char *helper = malloc(sango_run_py_len + 1);
+    memcpy(helper, sango_run_py, sango_run_py_len);
+    helper[sango_run_py_len] = '\0';
+    if (PyRun_SimpleString(helper) != 0) { free(helper); return 3; }
+    free(helper);
+
     return 0;
 
 fail:
@@ -108,21 +115,11 @@ uint64_t eval(const char *code_ptr, size_t code_len) {
     if (code_len) memcpy(code, code_ptr, code_len);
     code[code_len] = '\0';
 
-    PyObject *v = PyRun_StringFlags(code, Py_eval_input,
-                                    g_globals, g_globals, NULL);
-    if (!v && PyErr_Occurred() &&
-        PyErr_ExceptionMatches(PyExc_SyntaxError)) {
-        PyErr_Clear();
-        v = PyRun_StringFlags(code, Py_file_input,
-                              g_globals, g_globals, NULL);
-        if (v) {
-            Py_DECREF(v);
-            free(code);
-            return pack_cstr(TAG_OK, "None");
-        }
+    PyObject *runner = PyDict_GetItemString(g_globals, "__sango_run");
+    if (!runner) {
+        return pack_cstr(TAG_ERROR, "runner __sango_run not loaded");
     }
-    free(code);
-
+    PyObject *v = PyObject_CallFunction(runner, "s#O", code_ptr, (Py_ssize_t)code_len, g_globals);
     if (!v) {
         return pack_pyerror();
     }
