@@ -389,20 +389,40 @@ f = _make_counter()
 	}
 	defer fork3.Release()
 
-	r, err = fork3.Eval(ctx, []byte(`import json`))
+	r, err = fork3.Eval(ctx, []byte(`import json; json.dumps({"a": 1})`))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !r.OK() {
-		t.Fatalf("import after fork failed: %v", r.Err)
 	}
 
-	r, err = fork3.Eval(ctx, []byte(`json.dumps({"a": 1})`))
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !r.OK() || string(r.Value) != `'{"a": 1}'` {
 		t.Fatalf("json.dumps after fork: got %q / %v", r.Value, r.Err)
 	}
-	t.Logf("got %q", r.Value)
+
+	t.Logf("got %q by fork3", r.Value)
+
+	fork4, err := rt.Restore(ctx, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fork4.Release()
+
+	r, err = fork4.Eval(ctx, []byte(`import json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !r.OK() {
+		t.Fatalf("import json after fork: got %q / %v", r.Value, r.Err)
+	}
+
+	r, err = fork4.Eval(ctx, []byte(`json.dumps({"a": 1})`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !r.OK() || string(r.Value) != `'{"a": 1}'` {
+		t.Fatalf("json.dumps after fork: got %q / %v", r.Value, r.Err)
+	}
+
+	t.Logf("got %q by fork4", r.Value)
 }

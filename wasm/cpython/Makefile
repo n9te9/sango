@@ -77,6 +77,9 @@ all: $(OUT) $(STDLIB_ZIP)
 
 install: $(CC)
 
+sango_run.h: sango_run.py
+	xxd -i sango_run.py > sango_run.h
+
 $(CC):
 	@echo "installing $(WASI_SDK_NAME) ..."
 	mkdir -p toolchain
@@ -96,7 +99,7 @@ $(CPY_INSTALL):	$(CC) $(CPY_SRC_DIR)
 	@test -f $(CPY_INSTALL)/lib/libpython$(CPY_VERSION).a || \
 	  { echo "ERROR: libpython$(CPY_VERSION).a not found under $(CPY_INSTALL)/lib"; exit 1; }
 
-$(OUT):	$(CC) $(CPY_INSTALL) sango_cpython.c
+$(OUT):	$(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h
 	$(CC) $(CFLAGS) sango_cpython.c $(HACL_OBJS) -o $(OUT) $(LDFLAGS)
 	@ls -lh $(OUT)
 
