@@ -89,7 +89,67 @@ LDFLAGS := -mexec-model=reactor \
     -Wl,--export=eval \
     -Wl,-z,stack-size=8388608
 
-.PHONY: all toolchains install stdlib clean distclean
+# numpy cross build
+
+MS_VERSION := 3.0.2
+MS_SDIST   := build/sdists/markupsafe-$(MS_VERSION).tar.gz
+MS_SRC     := build/sdists/markupsafe-$(MS_VERSION)
+MS_OBJ     := build/ext/markupsafe_speedups.o
+
+$(MS_SDIST): $(HOST_PYTHON)
+	mkdir -p build/sdists
+	$(VENV)/bin/pip download markupsafe==$(MS_VERSION) \
+	  --no-binary :all: --no-deps -d build/sdists
+
+$(MS_OBJ): $(CC) $(CPY_INSTALL) $(MS_SRC)
+	mkdir -p build/ext
+	$(CC) $(CFLAGS) -c $(MS_SRC)/src/markupsafe/_speedups.c -o $(MS_OBJ)
+
+NUMPY_VERSION := 2.1.3
+NUMPY_SRC     := build/numpy
+CROSS_INI     := build/wasi-cross.ini
+
+$(CROSS_INI): Makefile
+	mkdir -p build
+	@printf '%s\n' \
+	  '[binaries]' \
+	  "c = '$(WASI_SDK_DIR)/bin/clang'" \
+	  "ar = '$(WASI_SDK_DIR)/bin/llvm-ar'" \
+	  "strip = '$(WASI_SDK_DIR)/bin/llvm-strip'" \
+	  '' \
+	  '[host_machine]' \
+	  "system = 'wasi'" \
+	  "cpu_family = 'wasm32'" \
+	  "cpu = 'wasm32'" \
+	  "endian = 'little'" \
+	  '' \
+	  '[built-in options]' \
+	  "c_args = ['--target=wasm32-wasip1', '-D_WASI_EMULATED_SIGNAL', '-D_WASI_EMULATED_MMAN', '-I$(abspath $(CPY_INSTALL))/include/python$(CPY_VERSION)']" \
+	  "c_link_args = ['--target=wasm32-wasip1']" \
+	  > $(CROSS_INI)
+	@echo "generated $(CROSS_INI)"
+
+.PHONY: all toolchains install stdlib clean distclean ext-markupsafe numpy-configure
+
+ext-markupsafe: $(MS_OBJ)
+	@echo "markupsafe _speedups.o built: $(MS_OBJ)"
+
+$(MS_SRC): $(MS_SDIST)
+	cd build/sdists && tar xzf markupsafe-$(MS_VERSION).tar.gz
+	@test -f $(MS_SRC)/src/markupsafe/_speedups.c || \
+	  { echo "ERROR: _speedups.c not found. check: ls build/sdists/"; exit 1; }
+
+$(NUMPY_SRC):
+	mkdir -p build 
+	git clone --depth 1 --branch v$(NUMPY_VERSION) https://github.com/numpy/numpy $(NUMPY_SRC)
+	cd $(NUMPY_SRC) && git submodule update --init --recursive
+
+numpy-configure: $(CROSS_INI) $(NUMPY_SRC) $(HOST_PYTHON)
+	cd $(NUMPY_SRC) && \
+	  $(VENV)/bin/meson setup builddir-wasi \
+	    --cross-file $(abspath $(CROSS_INI)) \
+	    -Dblas=none -Dlapack=none \
+	    -Ddisable-optimization=true
 
 all: $(OUT) $(STDLIB_ZIP)
 
@@ -135,11 +195,13 @@ $(CPY_INSTALL):	$(CC) $(CPY_SRC_DIR)
 sango_run.h: sango_run.py
 	xxd -i sango_run.py > sango_run.h
 
-$(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h
+EXT_OBJS := $(MS_OBJ)
+
+$(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h $(EXT_OBJS)
 	$(CC) $(CFLAGS) sango_cpython.c \
 	  $$(find $(CPY_HACL) -name '*.o' 2>/dev/null) \
+	  $(EXT_OBJS) \
 	  -o $(OUT) $(LDFLAGS)
-	@ls -lh $(OUT)
 
 stdlib: $(STDLIB_ZIP)
 
