@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := all
+
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
@@ -212,7 +214,11 @@ $(STDLIB_ZIP): $(CPY_INSTALL)
 			-x "test/*" "*/test/*" "*/tests/*" \
 			"*/__pycache__/*" "*.pyc" \
 			"idlelib/*" "tkinter/*" "turtledemo/*" \
-			"ensurepip/*" "pydoc_data/*"
+      "ensurepip/*" "pydoc_data/*"
+	@echo "adding markupsafe python sources ..."
+	cd $(MS_SRC)/src && \
+		zip -qr $(abspath $(STDLIB_ZIP)) markupsafe \
+		-x "*/__pycache__/*" "*.pyc" "*.c" "*.pyi"
 
 clean:
 	rm -rf build $(OUT) $(STDLIB_ZIP)
