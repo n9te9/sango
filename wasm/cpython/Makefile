@@ -20,6 +20,7 @@ WASI_SDK_NAME := wasi-sdk-$(WASI_SDK_VERSION).0-$(WASI_ARCH)-$(WASI_OS)
 WASI_SDK_URL  := https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$(WASI_SDK_VERSION)/$(WASI_SDK_NAME).tar.gz
 WASI_SDK_DIR  ?= $(CURDIR)/toolchain/$(WASI_SDK_NAME)
 CC            := $(WASI_SDK_DIR)/bin/clang
+CXX := $(WASI_SDK_DIR)/bin/clang++
 
 PBS_TAG   ?= 20260718
 PBS_PYVER ?= 3.13.14
@@ -73,6 +74,23 @@ CFLAGS := --target=wasm32-wasip1 -O2 \
     -D_GNU_SOURCE
 
 LDFLAGS := -mexec-model=reactor \
+    -fwasm-exceptions \
+    -L$(WASI_SDK_DIR)/share/wasi-sysroot/lib/wasm32-wasip1/eh \
+    -L$(CPY_INSTALL)/lib \
+    -L$(CPY_MPDEC) \
+    -L$(CPY_EXPAT) \
+    -lpython$(CPY_VERSION) \
+    -lmpdec \
+    -lexpat \
+    -lc++abi \
+    -lunwind \
+    -lwasi-emulated-signal \
+    -lwasi-emulated-getpid \
+    -lwasi-emulated-process-clocks \
+    -lwasi-emulated-mman \
+    -ldl \
+    -Wl,--strip-debug \
+    -Wl,--gc-sections \
     -L$(CPY_INSTALL)/lib \
     -L$(CPY_MPDEC) \
     -L$(CPY_EXPAT) \
@@ -84,11 +102,14 @@ LDFLAGS := -mexec-model=reactor \
     -lwasi-emulated-process-clocks \
     -lwasi-emulated-mman \
     -ldl \
+		-Wl,--strip-debug \
     -Wl,--gc-sections \
     -Wl,--export=allocate \
     -Wl,--export=deallocate \
     -Wl,--export=initialize \
     -Wl,--export=eval \
+		-Wl,--wrap=strtold \
+		-Wl,--wrap=strtold_l \
     -Wl,-z,stack-size=8388608
 
 # numpy cross build
@@ -116,6 +137,7 @@ $(CROSS_INI): Makefile
 	@printf '%s\n' \
 	  '[binaries]' \
 	  "c = '$(WASI_SDK_DIR)/bin/clang'" \
+    "cpp = '$(WASI_SDK_DIR)/bin/clang++'" \
 	  "ar = '$(WASI_SDK_DIR)/bin/llvm-ar'" \
 	  "strip = '$(WASI_SDK_DIR)/bin/llvm-strip'" \
 	  '' \
@@ -125,13 +147,36 @@ $(CROSS_INI): Makefile
 	  "cpu = 'wasm32'" \
 	  "endian = 'little'" \
 	  '' \
+    '[properties]' \
+	  "longdouble_format = 'IEEE_DOUBLE_LE'" \
+	  "python_purelib = '$(abspath $(CPY_INSTALL))/lib/python$(CPY_VERSION)'" \
+	  "python_platlib = '$(abspath $(CPY_INSTALL))/lib/python$(CPY_VERSION)'" \
+	  '' \
 	  '[built-in options]' \
-	  "c_args = ['--target=wasm32-wasip1', '-D_WASI_EMULATED_SIGNAL', '-D_WASI_EMULATED_MMAN', '-I$(abspath $(CPY_INSTALL))/include/python$(CPY_VERSION)']" \
+	  "c_args = ['--target=wasm32-wasip1', '-D_WASI_EMULATED_SIGNAL', '-D_WASI_EMULATED_MMAN', '-D__EMSCRIPTEN__', '-Wno-incompatible-pointer-types', '-I$(abspath $(CPY_INSTALL))/include/python$(CPY_VERSION)']" \
 	  "c_link_args = ['--target=wasm32-wasip1']" \
+	  "cpp_args = ['--target=wasm32-wasip1', '-D_WASI_EMULATED_SIGNAL', '-D_WASI_EMULATED_MMAN', '-fwasm-exceptions', '-D__EMSCRIPTEN__', '-I$(abspath $(CPY_INSTALL))/include/python$(CPY_VERSION)']" \
+	  "cpp_link_args = ['--target=wasm32-wasip1', '-fwasm-exceptions']" \
 	  > $(CROSS_INI)
 	@echo "generated $(CROSS_INI)"
 
-.PHONY: all toolchains install stdlib clean distclean ext-markupsafe numpy-configure
+NUMPY_BUILDDIR := $(NUMPY_SRC)/builddir-wasi
+
+$(NUMPY_BUILDDIR)/build.ninja: $(CROSS_INI) $(NUMPY_SRC) $(HOST_PYTHON)
+	cd $(NUMPY_SRC) && \
+	  PATH="$(abspath $(VENV))/bin:$$PATH" \
+	  _PYTHON_SYSCONFIGDATA_NAME=_sysconfigdata__wasi_wasm32-wasi \
+	  PYTHONPATH="$(abspath $(CPY_INSTALL))/lib/python$(CPY_VERSION)" \
+	  $(abspath $(HOST_PYTHON)) vendored-meson/meson/meson.py setup builddir-wasi \
+	    --cross-file $(abspath $(CROSS_INI)) \
+	    -Dblas=none -Dlapack=none -Ddisable-optimization=true
+
+NUMPY_UMATH_DIR := $(NUMPY_BUILDDIR)/numpy/_core/_multiarray_umath.cpython-313-wasm32-wasi.so.p
+NUMPY_LINALG_DIR := $(NUMPY_BUILDDIR)/numpy/linalg/_umath_linalg.cpython-313-wasm32-wasi.so.p
+
+NUMPY_INSTALL := build/numpy-install
+
+.PHONY: all toolchains install stdlib clean distclean ext-markupsafe numpy-configure numpy-compile numpy-objs
 
 ext-markupsafe: $(MS_OBJ)
 	@echo "markupsafe _speedups.o built: $(MS_OBJ)"
@@ -146,12 +191,22 @@ $(NUMPY_SRC):
 	git clone --depth 1 --branch v$(NUMPY_VERSION) https://github.com/numpy/numpy $(NUMPY_SRC)
 	cd $(NUMPY_SRC) && git submodule update --init --recursive
 
-numpy-configure: $(CROSS_INI) $(NUMPY_SRC) $(HOST_PYTHON)
-	cd $(NUMPY_SRC) && \
-	  $(VENV)/bin/meson setup builddir-wasi \
-	    --cross-file $(abspath $(CROSS_INI)) \
-	    -Dblas=none -Dlapack=none \
-	    -Ddisable-optimization=true
+$(NUMPY_INSTALL): $(NUMPY_BUILDDIR)/build.ninja
+	-cd $(NUMPY_SRC) && \
+	  PATH="$(abspath $(VENV))/bin:$$PATH" \
+	  $(VENV)/bin/meson install -C builddir-wasi --destdir $(abspath $(NUMPY_INSTALL))
+	@find $(NUMPY_INSTALL) -name "version.py" | head -1
+
+numpy-objs: $(NUMPY_BUILDDIR)/build.ninja
+	@echo "numpy objects: $$(find $(NUMPY_UMATH_DIR) -name '*.o' | wc -l)"
+
+numpy-configure: $(NUMPY_BUILDDIR)/build.ninja
+
+numpy-compile: $(NUMPY_BUILDDIR)/build.ninja
+	-cd $(NUMPY_SRC) && \
+	  PATH="$(abspath $(VENV))/bin:$$PATH" \
+	  $(VENV)/bin/ninja -C builddir-wasi -k 0
+	@echo "numpy objects: $$(find $(NUMPY_BUILDDIR) -name '*.o' | wc -l)"
 
 all: $(OUT) $(STDLIB_ZIP)
 
@@ -174,6 +229,10 @@ $(HOST_PY):
 	  echo "ERROR: expected $(HOST_PY) after extraction."; \
 	  echo "check the archive layout: find toolchain/python -name 'python3*'"; \
 	  exit 1; }
+	@if [ -d toolchain/python/include/python$(CPY_VERSION) ]; then \
+	  mv toolchain/python/include/python$(CPY_VERSION) \
+	     toolchain/python/include/python$(CPY_VERSION).hidden; \
+	fi
 
 $(HOST_PYTHON): $(HOST_PY)
 	$(HOST_PY) -m venv $(VENV)
@@ -199,15 +258,35 @@ sango_run.h: sango_run.py
 
 EXT_OBJS := $(MS_OBJ)
 
-$(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h $(EXT_OBJS)
-	$(CC) $(CFLAGS) sango_cpython.c \
+NUMPY_STAMP := $(NUMPY_BUILDDIR)/numpy/_core/libnpymath.a
+
+$(NUMPY_STAMP): $(NUMPY_BUILDDIR)/build.ninja
+	-cd $(NUMPY_SRC) && \
+	  PATH="$(abspath $(VENV))/bin:$$PATH" \
+	  $(VENV)/bin/ninja -C builddir-wasi -k 0
+	@test -f $(NUMPY_STAMP) || { echo "ERROR: numpy build did not produce $(NUMPY_STAMP)"; exit 1; }
+
+$(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h $(EXT_OBJS) $(NUMPY_STAMP)
+	$(CXX) $(CFLAGS) -x c sango_cpython.c -x none \
 	  $$(find $(CPY_HACL) -name '*.o' 2>/dev/null) \
 	  $(EXT_OBJS) \
-	  -o $(OUT) $(LDFLAGS)
+		$$(find $(NUMPY_BUILDDIR) -name '*.o' -path '*.so.p/*' \
+	     ! -path '*tests*' ! -path '*_simd*' \
+	     ! -path '*_umath_linalg*lapack_lite_f2c*' \
+	     ! -path '*_umath_linalg*lapack_lite_python_xerbla*' 2>/dev/null) \
+		$(NUMPY_BUILDDIR)/numpy/_core/libnpymath.a \
+	  $(NUMPY_BUILDDIR)/numpy/_core/lib_multiarray_umath_mtargets.a \
+	  $(NUMPY_BUILDDIR)/numpy/_core/libhighway.a \
+	  $(NUMPY_BUILDDIR)/numpy/random/libnpyrandom.a \
+	  -o $(OUT).raw $(LDFLAGS)
+	wasm-opt --translate-to-exnref $(OUT).raw -o $(OUT)
+	@rm -f $(OUT).raw
+	@ls -lh $(OUT)
 
 stdlib: $(STDLIB_ZIP)
 
-$(STDLIB_ZIP): $(CPY_INSTALL)
+$(STDLIB_ZIP): $(CPY_INSTALL) $(MS_SRC) $(NUMPY_SRC) Makefile
+	@rm -f $(STDLIB_ZIP)
 	@echo "packaging stdlib into $(STDLIB_ZIP) ..."
 	cd $(CPY_INSTALL)/lib/python$(CPY_VERSION) && \
 		zip -qr $(abspath $(STDLIB_ZIP)) . \
@@ -219,6 +298,15 @@ $(STDLIB_ZIP): $(CPY_INSTALL)
 	cd $(MS_SRC)/src && \
 		zip -qr $(abspath $(STDLIB_ZIP)) markupsafe \
 		-x "*/__pycache__/*" "*.pyc" "*.c" "*.pyi"
+	@echo "adding numpy python sources ..."
+	cd $(NUMPY_SRC) && \
+		zip -qr $(abspath $(STDLIB_ZIP)) numpy \
+		-x "*/__pycache__/*" "*.pyc" "*.c" "*.h" "*.cpp" "*.pyx" "*.pxd" "*.src" \
+		   "*/tests/*" "*/test/*" "numpy/_core/src/*" "numpy/random/src/*" \
+		   "numpy/f2py/src/*" "*.so"
+	@echo "adding numpy generated files ..."
+	cd $(NUMPY_BUILDDIR) && \
+		zip -qr $(abspath $(STDLIB_ZIP)) numpy/version.py numpy/__config__.py 2>/dev/null || true
 
 clean:
 	rm -rf build $(OUT) $(STDLIB_ZIP)

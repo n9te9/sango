@@ -493,3 +493,80 @@ func TestExt_SurvivesFork(t *testing.T) {
 		t.Fatalf("import after fork: got %s", got)
 	}
 }
+
+func TestNumpy_Works(t *testing.T) {
+	rt := newExtRuntime(t)
+	inst, _ := rt.Acquire(t.Context())
+	defer inst.Release()
+
+	t.Log(evalOK(t, inst, `import numpy; numpy.__version__`))
+	t.Log(evalOK(t, inst, `import numpy; str(numpy.array([1,2,3]).sum())`))
+	t.Log(evalOK(t, inst, `import numpy; str(numpy.arange(10).mean())`))
+
+	ctx := t.Context()
+
+	inst.Eval(ctx, []byte(`import numpy; a = numpy.arange(5)`))
+	snap, _ := rt.Snapshot(inst)
+	fork, _ := rt.Restore(ctx, snap)
+	t.Log(evalOK(t, fork, `str(a.sum())`))
+}
+
+func TestNumpy_FFT(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+
+	rt := newExtRuntime(t)
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	evalOK(t, inst, `import numpy as np`)
+
+	t.Run("forward transform", func(t *testing.T) {
+		// fft([1,2,3,4]) -> [10+0j, -2+2j, -2+0j, -2-2j]
+		got := evalOK(t, inst, `str(np.fft.fft([1,2,3,4])[0].real)`)
+		if got != "'10.0'" {
+			t.Fatalf("got %s, want '10.0'", got)
+		}
+	})
+
+	t.Run("round trip", func(t *testing.T) {
+		// ifft(fft(x)) should recover the original signal
+		got := evalOK(t, inst,
+			`str(np.allclose(np.fft.ifft(np.fft.fft([1,2,3,4])).real, [1,2,3,4]))`)
+		if got != "'True'" {
+			t.Fatalf("ifft(fft(x)) != x: got %s", got)
+		}
+	})
+
+	t.Run("real fft", func(t *testing.T) {
+		got := evalOK(t, inst, `str(len(np.fft.rfft([1,2,3,4])))`)
+		if got != "'3'" {
+			t.Fatalf("rfft length: got %s, want '3'", got)
+		}
+	})
+
+	t.Run("guest error is a value, not a crash", func(t *testing.T) {
+		res, err := inst.Eval(t.Context(), []byte(`np.fft.fft([])`))
+		if err != nil {
+			t.Fatalf("infra error (instance died?): %v", err)
+		}
+		if res.OK() {
+			t.Fatalf("expected an error for zero-length fft, got %q", res.Value)
+		}
+		if len(res.Err.Message) == 0 {
+			t.Fatal("empty error message")
+		}
+		t.Logf("zero-length fft error (expected): %s", res.Err)
+	})
+
+	t.Run("instance survives a thrown exception", func(t *testing.T) {
+		got := evalOK(t, inst, `str(np.fft.fft([1,2,3,4])[0].real)`)
+		if got != "'10.0'" {
+			t.Fatalf("instance broken after exception: got %s", got)
+		}
+	})
+}

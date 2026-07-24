@@ -12,6 +12,29 @@
 
 static PyObject *g_globals = NULL;
 extern PyObject *PyInit__speedups(void);
+extern PyObject *PyInit__multiarray_umath(void);
+extern PyObject *PyInit__umath_linalg(void);
+extern PyObject *PyInit_lapack_lite(void);
+extern PyObject *PyInit_mtrand(void);
+extern PyObject *PyInit__generator(void);
+extern PyObject *PyInit__bounded_integers(void);
+extern PyObject *PyInit__common(void);
+extern PyObject *PyInit_bit_generator(void);
+extern PyObject *PyInit__mt19937(void);
+extern PyObject *PyInit__pcg64(void);
+extern PyObject *PyInit__philox(void);
+extern PyObject *PyInit__sfc64(void);
+extern PyObject *PyInit__pocketfft_umath(void);
+
+long double __wrap_strtold(const char *nptr, char **endptr) {
+    return (long double)strtod(nptr, endptr);
+}
+
+long double __wrap_strtold_l(const char *__restrict nptr, char **__restrict endptr,
+                             struct __locale_struct *loc) {
+    (void)loc;
+    return (long double)strtod(nptr, endptr);
+}
 
 __attribute__((export_name("allocate")))
 void *allocate(size_t size) {
@@ -66,6 +89,45 @@ __attribute__((export_name("initialize")))
 uint32_t initialize(void) {
     if (PyImport_AppendInittab("markupsafe._speedups", PyInit__speedups) == -1) {
         return 4;
+    }
+    if (PyImport_AppendInittab("numpy._core._multiarray_umath", PyInit__multiarray_umath) == -1) {
+        return 5;
+    }
+    if (PyImport_AppendInittab("numpy.linalg._umath_linalg", PyInit__umath_linalg) == -1) {
+        return 6;
+    }
+    if (PyImport_AppendInittab("numpy.linalg.lapack_lite", PyInit_lapack_lite) == -1) {
+        return 7;
+    }
+    if (PyImport_AppendInittab("numpy.fft._pocketfft_umath", PyInit__pocketfft_umath) == -1) {
+        return 8;
+    }
+    if (PyImport_AppendInittab("numpy.random.mtrand", PyInit_mtrand) == -1) {
+        return 9;
+    }
+    if (PyImport_AppendInittab("numpy.random._generator", PyInit__generator) == -1) {
+        return 10;
+    }
+    if (PyImport_AppendInittab("numpy.random._bounded_integers", PyInit__bounded_integers) == -1) {
+        return 11;
+    }
+    if (PyImport_AppendInittab("numpy.random._common", PyInit__common) == -1) {
+        return 12;
+    }
+    if (PyImport_AppendInittab("numpy.random.bit_generator", PyInit_bit_generator) == -1) {
+        return 13;
+    }
+    if (PyImport_AppendInittab("numpy.random._mt19937", PyInit__mt19937) == -1) {
+        return 14;
+    }
+    if (PyImport_AppendInittab("numpy.random._pcg64", PyInit__pcg64) == -1) {
+        return 15;
+    }
+    if (PyImport_AppendInittab("numpy.random._philox", PyInit__philox) == -1) {
+        return 16;
+    }
+    if (PyImport_AppendInittab("numpy.random._sfc64", PyInit__sfc64) == -1) {
+        return 17;
     }
     
     PyConfig cfg;
