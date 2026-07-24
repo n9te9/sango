@@ -174,6 +174,7 @@ snapshot/fork work.
 Rebuilding the wasm from source:
 
 ```bash
+brew install binaryen   # wasm-opt, needed for the exception-handling transform
 make -C wasm/quickjs install   # pin + fetch wasi-sdk (once)
 make -C wasm/quickjs           # clone quickjs-ng, build, emit adapter/quickjs/quickjs.wasm
 make -C wasm/cpython install && make -C wasm/cpython
