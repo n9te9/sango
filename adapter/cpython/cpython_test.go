@@ -426,3 +426,70 @@ f = _make_counter()
 
 	t.Logf("got %q by fork4", r.Value)
 }
+
+func evalOK(t *testing.T, inst *sango.Instance, code string) string {
+	t.Helper()
+	res, err := inst.Eval(t.Context(), []byte(code))
+	if err != nil {
+		t.Fatalf("infra error on %q: %v", code, err)
+	}
+	if !res.OK() {
+		t.Fatalf("guest error on %q: %s", code, res.Err)
+	}
+	return string(res.Value)
+}
+
+func newExtRuntime(t *testing.T) *sango.Runtime {
+	t.Helper()
+	stdlib, _ := cpython.WithStdlib()
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(),
+		sango.WithWASI(), stdlib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt.Close(t.Context()) })
+	return rt
+}
+
+func TestExt_SurvivesFork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+	rt := newExtRuntime(t)
+	ctx := t.Context()
+
+	inst, err := rt.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	// import 済みの状態を snapshot に含める
+	evalOK(t, inst, `from markupsafe._speedups import _escape_inner`)
+	snap, err := rt.Snapshot(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// fork 側で C 拡張の関数を呼ぶ(import 済み状態が複製されているか)
+	fork, err := rt.Restore(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fork.Release()
+
+	if got := evalOK(t, fork, `str(_escape_inner("<i>"))`); got != "'&lt;i&gt;'" {
+		t.Fatalf("C extension broken after fork: got %s", got)
+	}
+
+	// fork 後に新規 import する経路も確認(ホスト側 fd テーブルが新品の状態)
+	fresh, err := rt.Restore(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Release()
+
+	if got := evalOK(t, fresh, `import markupsafe; str(markupsafe.escape("<u>"))`); got != "'&lt;u&gt;'" {
+		t.Fatalf("import after fork: got %s", got)
+	}
+}

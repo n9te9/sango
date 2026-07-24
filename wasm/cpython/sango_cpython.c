@@ -11,6 +11,7 @@
 #define TAG_ERROR 0x01
 
 static PyObject *g_globals = NULL;
+extern PyObject *PyInit__speedups(void);
 
 __attribute__((export_name("allocate")))
 void *allocate(size_t size) {
@@ -63,6 +64,10 @@ static uint64_t pack_pyerror(void) {
 
 __attribute__((export_name("initialize")))
 uint32_t initialize(void) {
+    if (PyImport_AppendInittab("markupsafe._speedups", PyInit__speedups) == -1) {
+        return 4;
+    }
+    
     PyConfig cfg;
     PyConfig_InitIsolatedConfig(&cfg);
 
