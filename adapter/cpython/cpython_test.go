@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -263,18 +264,7 @@ func TestCPython_Eval(t *testing.T) {
 }
 
 func TestRealWasm_OneshotAcquire(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip real wasm test in -short mode")
-	}
-	stdlib, err := cpython.WithStdlib()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), stdlib)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close(t.Context())
+	rt := newExtRuntime(t)
 
 	inst, err := rt.Acquire(t.Context())
 	if err != nil {
@@ -295,19 +285,7 @@ func TestRealWasm_OneshotAcquire(t *testing.T) {
 }
 
 func TestRealWasm_Fork(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip real wasm test in -short mode")
-	}
-
-	stdlib, err := cpython.WithStdlib()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), sango.WithWASI(), stdlib)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close(t.Context())
+	rt := newExtRuntime(t)
 
 	ctx := t.Context()
 
@@ -439,15 +417,21 @@ func evalOK(t *testing.T, inst *sango.Instance, code string) string {
 	return string(res.Value)
 }
 
+var sharedExtRuntime = sync.OnceValues(func() (*sango.Runtime, error) {
+	opt, err := cpython.WithStdlib()
+	if err != nil {
+		return nil, err
+	}
+	return sango.New(context.Background(), cpython.Wasm(), cpython.CPython(),
+		sango.WithWASI(), opt)
+})
+
 func newExtRuntime(t *testing.T) *sango.Runtime {
 	t.Helper()
-	stdlib, _ := cpython.WithStdlib()
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(),
-		sango.WithWASI(), stdlib)
+	rt, err := sharedExtRuntime()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rt.Close(t.Context()) })
 	return rt
 }
 
@@ -512,10 +496,6 @@ func TestNumpy_Works(t *testing.T) {
 }
 
 func TestPandas_Works(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip real wasm test in -short mode")
-	}
-
 	rt := newExtRuntime(t)
 	inst, err := rt.Acquire(t.Context())
 	if err != nil {
@@ -662,10 +642,6 @@ _r
 }
 
 func TestNumpy_FFT(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip real wasm test in -short mode")
-	}
-
 	rt := newExtRuntime(t)
 	inst, err := rt.Acquire(t.Context())
 	if err != nil {
