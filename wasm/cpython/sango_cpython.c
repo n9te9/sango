@@ -6,6 +6,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "sango_run.h"
+#include "sango_cpython_pandas.h"
 
 #define TAG_OK    0x00
 #define TAG_ERROR 0x01
@@ -129,6 +130,7 @@ uint32_t initialize(void) {
     if (PyImport_AppendInittab("numpy.random._sfc64", PyInit__sfc64) == -1) {
         return 17;
     }
+    sango_register_pandas();
     
     PyConfig cfg;
     PyConfig_InitIsolatedConfig(&cfg);

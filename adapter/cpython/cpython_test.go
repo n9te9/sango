@@ -511,6 +511,129 @@ func TestNumpy_Works(t *testing.T) {
 	t.Log(evalOK(t, fork, `str(a.sum())`))
 }
 
+func TestPandas_Works(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+
+	rt := newExtRuntime(t)
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+	t.Log(evalOK(t, inst, `import pandas as pd; pd.__version__`))
+
+	t.Run("low visibility ext modules", func(t *testing.T) {
+		evalOK(t, inst, `import pandas._libs.pandas_datetime`)
+		evalOK(t, inst, `import pandas._libs.pandas_parser`)
+		evalOK(t, inst, `import pandas._libs.window.aggregations`)
+		evalOK(t, inst, `import pandas._libs.tslibs.np_datetime`)
+	})
+
+	t.Run("dataframe basics", func(t *testing.T) {
+		got := evalOK(t, inst, `str(pd.DataFrame({"a": [1, 2, 3]})["a"].sum())`)
+		if got != "'6'" {
+			t.Fatalf("got %s, want '6'", got)
+		}
+	})
+
+	t.Run("groupby", func(t *testing.T) {
+		got := evalOK(t, inst, `str(pd.DataFrame(`+
+			`{"k": ["x", "x", "y"], "v": [1, 2, 3]}`+
+			`).groupby("k")["v"].sum()["x"])`)
+		if got != "'3'" {
+			t.Fatalf("got %s, want '3'", got)
+		}
+	})
+
+	t.Run("read_csv", func(t *testing.T) {
+		got := evalOK(t, inst,
+			`import io; str(pd.read_csv(io.StringIO("a,b\n1,2\n3,4"))["b"].sum())`)
+		if got != "'6'" {
+			t.Fatalf("got %s, want '6'", got)
+		}
+	})
+
+	t.Run("rolling window", func(t *testing.T) {
+		got := evalOK(t, inst, `str(pd.Series([1, 2, 3]).rolling(2).sum()[2])`)
+		if got != "'5.0'" {
+			t.Fatalf("got %s, want '5.0'", got)
+		}
+	})
+
+	t.Run("to_json", func(t *testing.T) {
+		got := evalOK(t, inst, `pd.DataFrame({"a": [1]}).to_json()`)
+		if got != `'{"a":{"0":1}}'` {
+			t.Fatalf("got %s", got)
+		}
+	})
+
+	t.Run("datetime", func(t *testing.T) {
+		got := evalOK(t, inst, `str(pd.to_datetime("2024-03-15").day)`)
+		if got != "'15'" {
+			t.Fatalf("got %s, want '15'", got)
+		}
+	})
+
+	t.Run("timezone", func(t *testing.T) {
+		got := evalOK(t, inst,
+			`str(pd.Timestamp("2024-01-01").tz_localize("Asia/Tokyo").tz)`)
+		if got != "'Asia/Tokyo'" {
+			t.Fatalf("got %s, want 'Asia/Tokyo' (tzdata is probably missing)", got)
+		}
+	})
+
+	t.Run("guest error is a value, not a crash", func(t *testing.T) {
+		res, err := inst.Eval(t.Context(), []byte(`pd.DataFrame({"a": [1]})["missing"]`))
+		if err != nil {
+			t.Fatalf("infra error (instance died?): %v", err)
+		}
+		if res.OK() {
+			t.Fatalf("expected KeyError, got %q", res.Value)
+		}
+		if len(res.Err.Message) == 0 {
+			t.Fatal("empty error message")
+		}
+		t.Logf("KeyError (expected): %s", res.Err)
+	})
+
+	t.Run("instance survives a thrown exception", func(t *testing.T) {
+		got := evalOK(t, inst, `str(pd.DataFrame({"a": [1, 2]})["a"].sum())`)
+		if got != "'3'" {
+			t.Fatalf("instance broken after exception: got %s", got)
+		}
+	})
+
+	t.Run("snapshot and restore", func(t *testing.T) {
+		ctx := t.Context()
+
+		if _, err := inst.Eval(ctx, []byte(
+			`df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})`)); err != nil {
+			t.Fatal(err)
+		}
+
+		snap, err := rt.Snapshot(inst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fork, err := rt.Restore(ctx, snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fork.Release()
+
+		got := evalOK(t, fork, `str(df["b"].sum())`)
+		if got != "'15'" {
+			t.Fatalf("got %s, want '15'", got)
+		}
+
+		if got := evalOK(t, fork, `str("pandas" in __import__("sys").modules)`); got != "'True'" {
+			t.Fatalf("pandas not in restored sys.modules: %s", got)
+		}
+	})
+}
+
 func TestNumpy_FFT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip real wasm test in -short mode")
