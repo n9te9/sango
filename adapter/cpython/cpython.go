@@ -41,8 +41,14 @@ func WithStdlib() (sango.Option, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cpython: open embedded stdlib zip: %w", err)
 	}
+
+	fsys, err := newMemFSFromZip(zr)
+	if err != nil {
+		return nil, fmt.Errorf("cpython: decompress embedded stdlib: %w", err)
+	}
+
 	return sango.WithModuleConfigModifier(func(c wazero.ModuleConfig) wazero.ModuleConfig {
-		return c.WithFSConfig(wazero.NewFSConfig().WithFSMount(zr, stdlibGuestPath))
+		return c.WithFSConfig(wazero.NewFSConfig().WithFSMount(fsys, stdlibGuestPath))
 	}), nil
 }
 

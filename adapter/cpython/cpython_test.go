@@ -522,6 +522,33 @@ func TestPandas_Works(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer inst.Release()
+
+	t.Log(evalOK(t, inst, `
+import traceback
+try:
+    pd.Timestamp("2024-01-01").tz_localize("Asia/Tokyo")
+    _r = "ok"
+except Exception:
+    _r = traceback.format_exc()
+_r
+`))
+
+	t.Log(evalOK(t, inst, `
+import os
+_r = ""
+for p in ("/lib/python3.13/pytz/zoneinfo/Asia/Tokyo",
+          "/lib/python3.13/tzdata/zoneinfo/Asia/Tokyo"):
+    _r += p + " exists=" + str(os.path.exists(p))
+    try:
+        f = open(p, "rb")
+        _r += " seekable=" + str(f.seekable())
+        f.close()
+    except Exception as e:
+        _r += " err=" + repr(e)
+    _r += "\n"
+_r
+`))
+
 	t.Log(evalOK(t, inst, `import pandas as pd; pd.__version__`))
 
 	t.Run("low visibility ext modules", func(t *testing.T) {

@@ -206,6 +206,11 @@ VENV_NUMPY_WASI  := $(VENV)/.stamp-numpy-headers-wasi
 
 PY_DEPS_DIR := build/pydeps
 
+SHIM_DIR := shims
+SHIM_SRCS := $(wildcard $(SHIM_DIR)/*.py)
+
+PANDAS_PATCH_STAMP := build/.stamp-pandas-patched
+
 .PHONY: all toolchains install stdlib clean distclean ext-markupsafe numpy-configure numpy-compile numpy-objs numpy-headers pandas-configure pandas-compile pandas-verify pandas-symbols
 
 ext-markupsafe: $(MS_OBJ)
@@ -320,13 +325,24 @@ $(PANDAS_SRC):
 	git clone --depth 1 --branch v$(PANDAS_VERSION) \
 	  https://github.com/pandas-dev/pandas $(PANDAS_SRC)
 
-$(PANDAS_BUILDDIR)/build.ninja: $(PANDAS_CROSS_INI) $(PANDAS_SRC) $(VENV_NUMPY_WASI)
+$(PANDAS_BUILDDIR)/build.ninja: $(PANDAS_CROSS_INI) $(PANDAS_SRC) $(VENV_NUMPY_WASI) $(PANDAS_PATCH_STAMP)
 	cd $(PANDAS_SRC) && \
 	  PATH="$(abspath $(VENV))/bin:$$PATH" \
 	  _PYTHON_SYSCONFIGDATA_NAME=_sysconfigdata__wasi_wasm32-wasi \
 	  PYTHONPATH="$(abspath $(CPY_INSTALL))/lib/python$(CPY_VERSION)" \
 	  $(abspath $(VENV))/bin/meson setup builddir-wasi \
 	    --cross-file $(abspath $(PANDAS_CROSS_INI))
+
+$(PANDAS_PATCH_STAMP): $(PANDAS_SRC)
+	@for f in \
+	  $(PANDAS_SRC)/pandas/_libs/src/vendored/numpy/datetime/np_datetime.c \
+	  $(PANDAS_SRC)/pandas/_libs/include/pandas/vendored/numpy/datetime/np_datetime.h \
+	  $(PANDAS_SRC)/pandas/_libs/src/datetime/pd_datetime.c ; do \
+	  [ -f "$$f" ] || { echo "ERROR: not found: $$f"; exit 1; }; \
+	  perl -pi -e 's/(?<![.>\w])get_datetime_metadata_from_dtype\b/pd_get_datetime_metadata_from_dtype/g' "$$f"; \
+	  echo "  patched $$f"; \
+	done
+	@touch $@
 
 numpy-headers: $(NUMPY_INC_STAMP)
 
@@ -398,11 +414,12 @@ $(CPY_SRC_DIR):
 
 $(CPY_INSTALL): $(CC) $(CPY_SRC_DIR) $(HOST_PYTHON) $(ZLIB_INSTALL)/lib/libz.a
 	@echo "building CPython for wasm32-wasip1 via Tools/wasm/wasi.py ..."
+	mkdir -p $(CPY_SRC_DIR)/cross-build/wasm32-wasip1/Modules
+	@echo "*static*" > $(CPY_SRC_DIR)/cross-build/wasm32-wasip1/Modules/Setup.local
+	@echo "zlib zlibmodule.c -I$(abspath $(ZLIB_INSTALL))/include -L$(abspath $(ZLIB_INSTALL))/lib -lz" >> $(CPY_SRC_DIR)/cross-build/wasm32-wasip1/Modules/Setup.local
 	cd $(CPY_SRC_DIR) && \
 	  WASI_SDK_PATH=$(WASI_SDK_DIR) \
 	  $(HOST_PYTHON) Tools/wasm/wasi.py build
-	@echo "*static*" > $(CPY_SRC_DIR)/cross-build/wasm32-wasip1/Modules/Setup.local
-	@echo "zlib zlibmodule.c -I$(abspath $(ZLIB_INSTALL))/include -L$(abspath $(ZLIB_INSTALL))/lib -lz" >> $(CPY_SRC_DIR)/cross-build/wasm32-wasip1/Modules/Setup.local
 	$(MAKE) -C $(CPY_SRC_DIR)/cross-build/wasm32-wasip1
 	$(MAKE) -C $(CPY_SRC_DIR)/cross-build/wasm32-wasip1 install \
 	  prefix=$(abspath $(CPY_INSTALL))
@@ -456,13 +473,14 @@ $(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h sango_cpython_pandas.h 
 
 stdlib: $(STDLIB_ZIP)
 
-$(STDLIB_ZIP): $(CPY_INSTALL) $(MS_SRC) $(NUMPY_SRC) $(PANDAS_SRC) $(PANDAS_STAMP) $(PY_DEPS_DIR) Makefile
+$(STDLIB_ZIP): $(CPY_INSTALL) $(MS_SRC) $(NUMPY_SRC) $(PANDAS_SRC) $(PANDAS_STAMP) $(PY_DEPS_DIR) $(SHIM_SRCS) Makefile
 	@rm -f $(STDLIB_ZIP)
 	@echo "packaging stdlib into $(STDLIB_ZIP) ..."
 	cd $(CPY_INSTALL)/lib/python$(CPY_VERSION) && \
 		zip -qr $(abspath $(STDLIB_ZIP)) . \
 			-x "test/*" "*/test/*" "*/tests/*" \
 			"*/__pycache__/*" "*.pyc" \
+			"ctypes/*" \
 			"idlelib/*" "tkinter/*" "turtledemo/*" \
       "ensurepip/*" "pydoc_data/*"
 	@echo "adding markupsafe python sources ..."
@@ -494,6 +512,9 @@ $(STDLIB_ZIP): $(CPY_INSTALL) $(MS_SRC) $(NUMPY_SRC) $(PANDAS_SRC) $(PANDAS_STAM
 	cd $(PY_DEPS_DIR) && \
 		zip -qr $(abspath $(STDLIB_ZIP)) . \
 		-x "*/__pycache__/*" "*.pyc" "*.dist-info/*" "bin/*"
+	@echo "adding wasip1 shims ..."
+	cd $(SHIM_DIR) && \
+		zip -qr $(abspath $(STDLIB_ZIP)) . -x "*/__pycache__/*" "*.pyc"
 
 clean:
 	rm -rf build $(OUT) $(STDLIB_ZIP)
