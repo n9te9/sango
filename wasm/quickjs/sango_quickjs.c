@@ -34,6 +34,22 @@ uint32_t initialize(void) {
     return 0;
 }
 
+static const char *result_to_cstring(JSValue v) {
+    if (JS_IsObject(v) && !JS_IsFunction(g_ctx, v)) {
+        JSValue json = JS_JSONStringify(g_ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+        if (JS_IsException(json)) {
+            JS_FreeValue(g_ctx, JS_GetException(g_ctx));
+        } else if (!JS_IsUndefined(json)) {
+            const char *s = JS_ToCString(g_ctx, json);
+            JS_FreeValue(g_ctx, json);
+            if (s) return s;
+        } else {
+            JS_FreeValue(g_ctx, json);
+        }
+    }
+    return JS_ToCString(g_ctx, v);
+}
+
 static uint64_t pack(uint8_t tag, const char *payload, size_t len) {
     uint8_t *buf = malloc(len + 1);
     if (!buf) return 0;
@@ -73,7 +89,7 @@ uint64_t eval(const char *code_ptr, size_t code_len) {
         return pack_exception();
     }
  
-    const char *s = JS_ToCString(g_ctx, v);
+    const char *s = result_to_cstring(v);
     if (!s) {
         JS_FreeValue(g_ctx, v);
         return pack_exception();
