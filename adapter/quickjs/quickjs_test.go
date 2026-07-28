@@ -414,3 +414,20 @@ func TestQuickJS_ResultConvention(t *testing.T) {
 		}
 	})
 }
+
+func TestQuickJS_KnownLimitations(t *testing.T) {
+	rt := newQuickJSRuntime(t)
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	t.Run("deep recursion traps (known limitation)", func(t *testing.T) {
+		res, err := inst.Eval(t.Context(), []byte(`(function f(){ return f(); })()`))
+		if err == nil {
+			t.Fatalf("stack overflow is now catchable (%q / %v) — update the docs", res.Value, res.Err)
+		}
+		t.Logf("traps as expected: %v", err)
+	})
+}
