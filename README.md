@@ -9,14 +9,14 @@ and **forked** — turning tree search, speculative execution, and
 pause/resume into cheap memory operations.
 
 ```
-Apple M2 Pro                     QuickJS (JS)    CPython 3.13
-─────────────────────────────────────────────────────────────
-Eval  (1 + 1)                    5.7 µs          17 µs
-Eval  (stdlib, json.dumps)      —                48 µs
-Acquire  (clean instance)        173 µs          1.5 ms
-Fork  (restore a snapshot)       158 µs          1.4 ms
-Snapshot                         72 µs / 1.3 MB  0.5 ms / 13 MB
-Cold init  (paid once, at New)   264 ms          1.7 s
+Apple M2 Pro                     QuickJS (JS)    CPython 3.13    CPython + numpy
+──────────────────────────────────────────────────────────────────────────────
+Eval  (1 + 1)                    5.7 µs          17 µs           TBD
+Eval  (stdlib, json.dumps)      —                48 µs           TBD
+Acquire  (clean instance)        173 µs          1.5 ms          TBD
+Fork  (restore a snapshot)       158 µs          1.4 ms          TBD
+Snapshot                         72 µs / 1.3 MB  0.5 ms / 13 MB  TBD
+Cold init  (paid once, at New)   264 ms          1.7 s           TBD
 ```
 
 Reproduce with `go test -bench . -benchmem -run '^$' ./adapter/...`.
@@ -120,6 +120,60 @@ Snapshots carry a header (adapter ID + wasm build hash) and restoring one
 against the wrong runtime is rejected explicitly rather than corrupting
 silently.
 
+## The scientific stack
+
+numpy is available as a separate CPython build with the C extensions
+statically linked into the wasm module. Same five methods, same
+snapshot/fork semantics:
+
+```go
+rt, _ := sango.New(ctx, cpython.WasmNumPy(), cpython.CPython(),
+	sango.WithWASI(), cpython.WithStdlib())
+
+sess, _ := rt.Acquire(ctx)
+sess.Eval(ctx, []byte(`import numpy as np`))
+res, _ := sess.Eval(ctx, []byte(`np.fft.fft(np.arange(8)).real.sum()`))
+```
+
+Because the interpreter is pre-imported into the golden snapshot, the
+multi-hundred-millisecond `import numpy` cost is paid once at `New`, not per
+acquire — the same trade the base build makes for interpreter startup.
+
+**What this changes, beyond throughput:**
+
+- **Error boundaries get coarser.** Pure-Python failures are all Python
+  exceptions, so `res.Err` is always something an LLM can act on. C
+  extensions add paths that terminate as wasm traps instead, and a trapped
+  instance cannot be trusted afterwards — its refcounts and C stack are
+  mid-operation. sango surfaces these as Go errors (`err != nil`), and the
+  correct recovery is to discard the instance and restore from a snapshot,
+  not to catch and continue. In practice the common LLM mistakes (shape
+  mismatches, dtype errors, API misuse) still arrive as ordinary Python
+  exceptions; traps are the rare tail.
+- **Forks share their RNG state.** `numpy.random`'s default generator seeds
+  itself from OS entropy at import time. A snapshot taken after import
+  captures that seed, so every fork produces the *identical* random stream.
+  This is deterministic-by-default, which is often what you want for
+  reproducible rollouts — but reseed explicitly after `Restore` if you need
+  independent draws.
+- **The package set is fixed at build time.** Static linking is what makes
+  snapshot/fork work at all, and the cost is that no C-extension package can
+  be added at runtime. Pure-Python packages can still be dropped into the
+  VFS; anything with a compiled component requires rebuilding the wasm. This
+  also means security updates to numpy ship as a new wasm binary, and every
+  existing snapshot is invalidated by the build-hash header.
+- **Interruption granularity.** A long ndarray operation has no Python
+  bytecode boundaries, so `context` cancellation stops it by terminating the
+  instance rather than raising into the guest. Budget for this the same way
+  you budget for traps.
+- **Size and snapshot cost.** The numpy build is substantially larger than
+  the stdlib-only one in both binary size and per-snapshot bytes (TBD —
+  measure before assuming it fits your pooling budget). Keep it as a
+  separate import so plain-Python workloads do not pay for it.
+
+pandas: TBD — additionally carries data-file dependencies (tzdata) that must
+be mounted into the VFS and go stale on their own schedule.
+
 ## Security model
 
 - The guest is a wasm module executed by [wazero](https://wazero.io); its
@@ -135,24 +189,29 @@ silently.
   structural impossibility, not a cleanup discipline.
 - The committed `.wasm` binaries are reproducible from the C sources in
   `wasm/` and verified in CI (rebuild + byte-for-byte diff).
+- Statically linked C extensions run inside the same linear memory and gain
+  no additional host capability. They do widen the trap surface: memory
+  safety bugs in the extension become instance termination, not host
+  compromise.
 
 ## Scope, honestly
 
-- **Python is stdlib-only.** No pip, no numpy/pandas. Most agent glue code
-  (math, dates, regex, JSON) needs neither; tell your model
-  *"standard library only"* in the system prompt and it will comply. If you
-  need the full scientific stack, a remote heavyweight sandbox (E2B, Daytona,
-  …) is the right tool — sango is the fast path next to it, not a
-  replacement.
+- **Packages are chosen at build time, not by pip.** The stdlib-only build
+  covers most agent glue code (math, dates, regex, JSON); the numpy build
+  covers the common analysis path. Anything else with a compiled component
+  means building your own wasm. If you need arbitrary `pip install` at
+  runtime, a remote heavyweight sandbox (E2B, Daytona, …) is the right
+  tool — sango is the fast path next to it, not a replacement.
 - **Bring your own build.** The wasm binary is an ordinary argument to
   `sango.New`. If you build a custom CPython with extra modules baked in,
   sango will run it; the snapshot header keeps builds from mixing.
 - **Sizes.** QuickJS adds ~1 MB to your binary; CPython (interpreter +
-  stdlib zip) adds ~30 MB. They are separate packages — import only what
-  you use.
+  stdlib zip) adds ~30 MB; the numpy build adds TBD. They are separate
+  packages — import only what you use.
 - **Long-running / adversarial code.** Use `context` deadlines on `Eval`
   (wazero interrupts on cancellation) and memory limits for hostile guests.
-  Hardening options are being expanded — see the issues.
+  Note that native code sections interrupt at coarser granularity than
+  Python bytecode. Hardening options are being expanded — see the issues.
 
 ## How it fits together
 
@@ -161,6 +220,8 @@ your Go app
 └── sango (core: Runtime / Instance / Snapshot — 5 methods)
     ├── adapter/quickjs   QuickJS-ng built for wasm32-wasi, //go:embed'd
     ├── adapter/cpython   CPython 3.13 + stdlib zip, //go:embed'd
+    │                     ├── stdlib-only build
+    │                     └── numpy 2.1.3 statically linked (incl. numpy.fft)
     └── wazero            pure-Go wasm runtime — no CGO anywhere
 ```
 
@@ -178,6 +239,7 @@ brew install binaryen   # wasm-opt, needed for the exception-handling transform
 make -C wasm/quickjs install   # pin + fetch wasi-sdk (once)
 make -C wasm/quickjs           # clone quickjs-ng, build, emit adapter/quickjs/quickjs.wasm
 make -C wasm/cpython install && make -C wasm/cpython
+make -C wasm/cpython numpy     # cross-build numpy and link it in
 ```
 
 ## Examples
