@@ -295,25 +295,23 @@ func TestRealWasm_OneshotAcquire(t *testing.T) {
 	}
 }
 
-func TestRealWasm_Fork(t *testing.T) {
-	path := os.Getenv("SANGO_QUICKJS_WASM")
-	if path == "" {
-		t.Skip("SANGO_QUICKJS_WASM not set")
-	}
-	wasm, err := os.ReadFile(path)
+func newQuickJSRuntime(t *testing.T) *sango.Runtime {
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(), sango.WithWASI())
 	if err != nil {
 		t.Fatal(err)
 	}
+	return rt
+}
 
-	rt, err := sango.New(t.Context(), wasm, quickjs.QuickJS(), sango.WithWASI())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close(t.Context())
+func TestRealWasm_Fork(t *testing.T) {
+	rt := newQuickJSRuntime(t)
 
 	ctx := t.Context()
 
 	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	inst.Eval(ctx, []byte(`var x = 40`))
 	snap, _ := rt.Snapshot(inst)
 
@@ -354,4 +352,82 @@ func TestRealWasm_Fork(t *testing.T) {
 	}
 
 	t.Logf("got %q", res2.Value)
+}
+
+func TestQuickJS_ResultConvention(t *testing.T) {
+	rt := newQuickJSRuntime(t)
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	tests := []struct {
+		name string
+		code string
+		want string
+	}{
+		{"number", `1 + 1`, `2`},
+		{"float", `1.5`, `1.5`},
+		{"string", `"hello"`, `hello`},
+		{"bool", `true`, `true`},
+		{"null", `null`, `null`},
+		{"undefined", `undefined`, `undefined`},
+		{"object", `({a: 1})`, `{"a":1}`},
+		{"array", `[1, 2, 3]`, `[1,2,3]`},
+		{"nested array", `[[1, 2], [3, 4]]`, `[[1,2],[3,4]]`},
+		{"comma in string", `["a,b", "c"]`, `["a,b","c"]`},
+		{"circular reference",
+			`(() => { const a = {}; a.self = a; return a; })()`,
+			`[object Object]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := inst.Eval(t.Context(), []byte(tt.code))
+			if err != nil {
+				t.Fatalf("infra error on %q: %v", tt.code, err)
+			}
+			if !res.OK() {
+				t.Fatalf("guest error on %q: %s", tt.code, res.Err)
+			}
+			if got := string(res.Value); got != tt.want {
+				t.Errorf("%s: got %q, want %q", tt.code, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("stringify failure does not leak an exception", func(t *testing.T) {
+		if _, err := inst.Eval(t.Context(),
+			[]byte(`(() => { const a = {}; a.self = a; return a; })()`)); err != nil {
+			t.Fatal(err)
+		}
+		res, err := inst.Eval(t.Context(), []byte(`1 + 1`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.OK() {
+			t.Fatalf("exception leaked into the next eval: %s", res.Err)
+		}
+		if got := string(res.Value); got != "2" {
+			t.Fatalf("got %q, want %q", got, "2")
+		}
+	})
+}
+
+func TestQuickJS_KnownLimitations(t *testing.T) {
+	rt := newQuickJSRuntime(t)
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	t.Run("deep recursion traps (known limitation)", func(t *testing.T) {
+		res, err := inst.Eval(t.Context(), []byte(`(function f(){ return f(); })()`))
+		if err == nil {
+			t.Fatalf("stack overflow is now catchable (%q / %v) — update the docs", res.Value, res.Err)
+		}
+		t.Logf("traps as expected: %v", err)
+	})
 }
