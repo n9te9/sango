@@ -20,7 +20,6 @@ type Runtime struct {
 	moduleHash      [32]byte
 	closed          atomic.Bool
 	moduleConfigMod func(wazero.ModuleConfig) wazero.ModuleConfig
-	forkParallelism int
 	ownedCache      wazero.CompilationCache
 
 	golden Snapshot
@@ -113,7 +112,6 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 		adapter:         adapter,
 		moduleHash:      sha256.Sum256(wasmBinary),
 		moduleConfigMod: cfg.moduleConfigMod,
-		forkParallelism: cfg.forkParallelism,
 		warm:            make(chan *Instance, max(cfg.poolSize, 1)),
 	}
 	if cacheOwned {
