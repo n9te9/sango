@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"runtime"
-	"sync"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
@@ -199,54 +197,6 @@ func (r *Runtime) Acquire(ctx context.Context) (*Instance, error) {
 	}
 }
 
-func (r *Runtime) AcquireN(ctx context.Context, n int) ([]*Instance, error) {
-	if n <= 0 {
-		return nil, nil
-	}
-	out := make([]*Instance, 0, n)
-	drained := 0
-	for len(out) < n {
-		select {
-		case inst := <-r.warm:
-			out = append(out, inst)
-			drained++
-		default:
-			goto done
-		}
-	}
-done:
-	if drained > 0 {
-		refillCount := drained
-		go func() {
-			refills, err := r.RestoreN(context.Background(), r.golden, refillCount)
-			if err != nil {
-				for _, inst := range refills {
-					inst.Release()
-				}
-				return
-			}
-			for _, inst := range refills {
-				select {
-				case r.warm <- inst:
-				default:
-					inst.Release()
-				}
-			}
-		}()
-	}
-	if remaining := n - len(out); remaining > 0 {
-		rest, err := r.RestoreN(ctx, r.golden, remaining)
-		if err != nil {
-			for _, inst := range out {
-				inst.Release()
-			}
-			return nil, err
-		}
-		out = append(out, rest...)
-	}
-	return out, nil
-}
-
 func (r *Runtime) Restore(ctx context.Context, s Snapshot) (*Instance, error) {
 	adapterID, hash, memory, err := decodeSnapshot(s)
 	if err != nil {
@@ -256,73 +206,6 @@ func (r *Runtime) Restore(ctx context.Context, s Snapshot) (*Instance, error) {
 		return nil, err
 	}
 	return r.restoreDecoded(ctx, memory)
-}
-
-func (r *Runtime) RestoreN(ctx context.Context, s Snapshot, n int) ([]*Instance, error) {
-	if n <= 0 {
-		return nil, nil
-	}
-	adapterID, hash, memory, err := decodeSnapshot(s)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.checkSnapshotIdentity(adapterID, hash); err != nil {
-		return nil, err
-	}
-
-	if n == 1 {
-		inst, err := r.restoreDecoded(ctx, memory)
-		if err != nil {
-			return nil, err
-		}
-		return []*Instance{inst}, nil
-	}
-
-	parallelism := r.forkParallelism
-	if parallelism <= 0 {
-		parallelism = runtime.GOMAXPROCS(0)
-	}
-	if parallelism > n {
-		parallelism = n
-	}
-
-	out := make([]*Instance, n)
-	sem := make(chan struct{}, parallelism)
-	var wg sync.WaitGroup
-	var firstErr atomic.Value
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if cctx.Err() != nil {
-				return
-			}
-			inst, err := r.restoreDecoded(cctx, memory)
-			if err != nil {
-				if firstErr.CompareAndSwap(nil, err) {
-					cancel()
-				}
-				return
-			}
-			out[idx] = inst
-		}(i)
-	}
-	wg.Wait()
-
-	if v := firstErr.Load(); v != nil {
-		for _, inst := range out {
-			if inst != nil {
-				inst.Release()
-			}
-		}
-		return nil, v.(error)
-	}
-	return out, nil
 }
 
 func (r *Runtime) checkSnapshotIdentity(adapterID string, hash [32]byte) error {
