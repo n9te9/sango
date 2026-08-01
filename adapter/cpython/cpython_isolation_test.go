@@ -10,25 +10,21 @@ import (
 	"github.com/n9te9/sango/adapter/cpython"
 )
 
-var sharedCacheDir = sync.OnceValue(func() string {
-	dir, err := context.TODO(), error(nil)
-	_ = dir
-	_ = err
-	return ""
+var sharedIsolationRuntime = sync.OnceValues(func() (*sango.Runtime, error) {
+	stdlibOpt, err := cpython.WithStdlib()
+	if err != nil {
+		return nil, err
+	}
+	return sango.New(context.Background(), cpython.Wasm(), cpython.CPython(),
+		sango.WithWASI(), stdlibOpt, sango.WithPoolSize(0))
 })
 
 func newIsolationRuntime(t *testing.T, opts ...sango.Option) *sango.Runtime {
 	t.Helper()
-	stdlibOpt, err := cpython.WithStdlib()
+	rt, err := sharedIsolationRuntime()
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts = append(opts, sango.WithWASI(), stdlibOpt)
-	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(), opts...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { rt.Close(t.Context()) })
 	return rt
 }
 
