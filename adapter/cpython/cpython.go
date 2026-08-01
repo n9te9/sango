@@ -6,6 +6,8 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/n9te9/sango"
 	"github.com/n9te9/sango/internal/cabi"
@@ -50,6 +52,25 @@ func WithStdlib() (sango.Option, error) {
 	return sango.WithModuleConfigModifier(func(c wazero.ModuleConfig) wazero.ModuleConfig {
 		return c.WithFSConfig(wazero.NewFSConfig().WithFSMount(fsys, stdlibGuestPath))
 	}), nil
+}
+
+func DefaultCacheDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("cpython: locate user cache dir: %w", err)
+	}
+	return filepath.Join(base, "sango", "cpython"), nil
+}
+
+func WithDefaultCache() (sango.Option, error) {
+	dir, err := DefaultCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("cpython: create cache dir %q: %w", dir, err)
+	}
+	return sango.WithCompilationCacheDir(dir), nil
 }
 
 func (c *cpythonAdapter) ID() string { return "cpython" }
