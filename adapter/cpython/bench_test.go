@@ -2,6 +2,7 @@ package cpython_test
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/n9te9/sango"
@@ -512,6 +513,438 @@ float(np.arange(1000, dtype=np.float64).sum())`)
 		if !res.OK() {
 			inst.Release()
 			b.Fatal(res.Err)
+		}
+		inst.Release()
+	}
+}
+
+func BenchmarkColdInit_Cached(b *testing.B) {
+	dir := b.TempDir()
+
+	warm := func() {
+		stdlibOpt, err := cpython.WithStdlib()
+		if err != nil {
+			b.Fatal(err)
+		}
+		opts := []sango.Option{
+			sango.WithWASI(),
+			stdlibOpt,
+			sango.WithCompilationCacheDir(dir),
+		}
+		rt, err := sango.New(b.Context(), cpython.Wasm(), cpython.CPython(), opts...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rt.Close(b.Context())
+	}
+	warm()
+
+	b.ResetTimer()
+	for b.Loop() {
+		stdlibOpt, err := cpython.WithStdlib()
+		if err != nil {
+			b.Fatal(err)
+		}
+		opts := []sango.Option{
+			sango.WithWASI(),
+			stdlibOpt,
+			sango.WithCompilationCacheDir(dir),
+		}
+		rt, err := sango.New(b.Context(), cpython.Wasm(), cpython.CPython(), opts...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rt.Close(b.Context())
+	}
+}
+
+type releaser interface {
+	Release() error
+}
+
+func BenchmarkForkFanout_Hold(b *testing.B) {
+	for _, withNumpy := range []bool{false, true} {
+		label := "plain"
+		setup := `x = 40`
+		if withNumpy {
+			label = "numpy"
+			setup = `import numpy; x = numpy.zeros(1000)`
+		}
+
+		for _, n := range []int{1, 10, 100, 1000} {
+			b.Run(fmt.Sprintf("%s/N=%d", label, n), func(b *testing.B) {
+				rt := newRuntime(b, sango.WithPoolSize(0))
+
+				inst, err := rt.Acquire(b.Context())
+				if err != nil {
+					b.Fatal(err)
+				}
+				if res, err := inst.Eval(b.Context(), []byte(setup)); err != nil || !res.OK() {
+					b.Fatalf("setup: %v / %v", err, res.Err)
+				}
+				snap, err := rt.Snapshot(inst)
+				if err != nil {
+					b.Fatal(err)
+				}
+				inst.Release()
+
+				forks := make([]releaser, 0, n)
+				var ms runtime.MemStats
+				var peakDelta uint64
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					b.StopTimer()
+					runtime.GC()
+					runtime.ReadMemStats(&ms)
+					base := ms.HeapAlloc
+					forks = forks[:0]
+					b.StartTimer()
+
+					for i := 0; i < n; i++ {
+						f, err := rt.Restore(b.Context(), snap)
+						if err != nil {
+							b.Fatal(err)
+						}
+						forks = append(forks, f)
+					}
+
+					b.StopTimer()
+					runtime.ReadMemStats(&ms)
+					if d := ms.HeapAlloc - base; d > peakDelta {
+						peakDelta = d
+					}
+					for _, f := range forks {
+						f.Release()
+					}
+					b.StartTimer()
+				}
+				b.StopTimer()
+
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*n), "ns/fork")
+				b.ReportMetric(float64(peakDelta)/float64(n), "B/fork-held")
+			})
+		}
+	}
+}
+
+func BenchmarkForkFanout_Discard(b *testing.B) {
+	for _, n := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			rt := newRuntime(b, sango.WithPoolSize(0))
+
+			inst, err := rt.Acquire(b.Context())
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := inst.Eval(b.Context(), []byte(`x = 40`)); err != nil {
+				b.Fatal(err)
+			}
+			snap, err := rt.Snapshot(inst)
+			if err != nil {
+				b.Fatal(err)
+			}
+			inst.Release()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				for i := 0; i < n; i++ {
+					f, err := rt.Restore(b.Context(), snap)
+					if err != nil {
+						b.Fatal(err)
+					}
+					f.Release()
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*n), "ns/fork")
+		})
+	}
+}
+
+func BenchmarkBranchExecute(b *testing.B) {
+	cases := []struct {
+		name  string
+		setup string
+		code  string
+	}{
+		{
+			name:  "trivial",
+			setup: `x = 40`,
+			code:  `1 + 1`,
+		},
+		{
+			name:  "medium",
+			setup: `x = 40`,
+			code: `
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+fib(2000)`,
+		},
+		{
+			name:  "numpy",
+			setup: `import numpy`,
+			code:  `int(numpy.arange(1_000_000).sum())`,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			rt := newRuntime(b, sango.WithPoolSize(0))
+
+			inst, err := rt.Acquire(b.Context())
+			if err != nil {
+				b.Fatal(err)
+			}
+			if res, err := inst.Eval(b.Context(), []byte(tc.setup)); err != nil || !res.OK() {
+				b.Fatalf("setup: %v / %v", err, res.Err)
+			}
+			snap, err := rt.Snapshot(inst)
+			if err != nil {
+				b.Fatal(err)
+			}
+			inst.Release()
+
+			code := []byte(tc.code)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				f, err := rt.Restore(b.Context(), snap)
+				if err != nil {
+					b.Fatal(err)
+				}
+				res, err := f.Eval(b.Context(), code)
+				if err != nil {
+					f.Release()
+					b.Fatal(err)
+				}
+				if !res.OK() {
+					f.Release()
+					b.Fatal(res.Err)
+				}
+				f.Release()
+			}
+		})
+	}
+}
+
+func BenchmarkBranchExecute_Parallel(b *testing.B) {
+	rt := newRuntime(b, sango.WithPoolSize(0))
+
+	inst, err := rt.Acquire(b.Context())
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := inst.Eval(b.Context(), []byte(`x = 40`)); err != nil {
+		b.Fatal(err)
+	}
+	snap, err := rt.Snapshot(inst)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inst.Release()
+
+	code := []byte(`sum(range(100))`)
+	ctx := b.Context()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			f, err := rt.Restore(ctx, snap)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			if _, err := f.Eval(ctx, code); err != nil {
+				f.Release()
+				b.Error(err)
+				return
+			}
+			f.Release()
+		}
+	})
+}
+
+func BenchmarkAmortized(b *testing.B) {
+	for _, withNumpy := range []bool{false, true} {
+		label := "plain"
+		setup := `x = 40`
+		if withNumpy {
+			label = "numpy"
+			setup = `import numpy`
+		}
+
+		for _, k := range []int{1, 10, 100, 1000} {
+			b.Run(fmt.Sprintf("%s/branches=%d", label, k), func(b *testing.B) {
+				code := []byte(`sum(range(100))`)
+				iters := 0
+
+				b.ResetTimer()
+				for b.Loop() {
+					iters++
+
+					stdlibOpt, err := cpython.WithStdlib()
+					if err != nil {
+						b.Fatal(err)
+					}
+					rt, err := sango.New(b.Context(), cpython.Wasm(), cpython.CPython(),
+						sango.WithWASI(), stdlibOpt, sango.WithPoolSize(0))
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					inst, err := rt.Acquire(b.Context())
+					if err != nil {
+						b.Fatal(err)
+					}
+					if res, err := inst.Eval(b.Context(), []byte(setup)); err != nil || !res.OK() {
+						b.Fatalf("setup: %v / %v", err, res.Err)
+					}
+					snap, err := rt.Snapshot(inst)
+					if err != nil {
+						b.Fatal(err)
+					}
+					inst.Release()
+
+					for j := 0; j < k; j++ {
+						f, err := rt.Restore(b.Context(), snap)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if _, err := f.Eval(b.Context(), code); err != nil {
+							f.Release()
+							b.Fatal(err)
+						}
+						f.Release()
+					}
+
+					rt.Close(b.Context())
+				}
+				b.StopTimer()
+
+				if iters > 0 {
+					perBranch := float64(b.Elapsed().Nanoseconds()) / float64(iters*k)
+					b.ReportMetric(perBranch, "ns/branch-amortized")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkAmortized_Cached(b *testing.B) {
+	dir := b.TempDir()
+
+	warm := func() {
+		stdlibOpt, err := cpython.WithStdlib()
+		if err != nil {
+			b.Fatal(err)
+		}
+		rt, err := sango.New(b.Context(), cpython.Wasm(), cpython.CPython(),
+			sango.WithWASI(), stdlibOpt, sango.WithPoolSize(0),
+			sango.WithCompilationCacheDir(dir))
+		if err != nil {
+			b.Fatal(err)
+		}
+		rt.Close(b.Context())
+	}
+	warm()
+
+	for _, withNumpy := range []bool{false, true} {
+		label := "plain"
+		setup := `x = 40`
+		if withNumpy {
+			label = "numpy"
+			setup = `import numpy`
+		}
+
+		for _, k := range []int{1, 10, 100, 1000} {
+			b.Run(fmt.Sprintf("%s/branches=%d", label, k), func(b *testing.B) {
+				code := []byte(`sum(range(100))`)
+				iters := 0
+
+				b.ResetTimer()
+				for b.Loop() {
+					iters++
+
+					stdlibOpt, err := cpython.WithStdlib()
+					if err != nil {
+						b.Fatal(err)
+					}
+					rt, err := sango.New(b.Context(), cpython.Wasm(), cpython.CPython(),
+						sango.WithWASI(), stdlibOpt, sango.WithPoolSize(0),
+						sango.WithCompilationCacheDir(dir))
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					inst, err := rt.Acquire(b.Context())
+					if err != nil {
+						b.Fatal(err)
+					}
+					if res, err := inst.Eval(b.Context(), []byte(setup)); err != nil || !res.OK() {
+						b.Fatalf("setup: %v / %v", err, res.Err)
+					}
+					snap, err := rt.Snapshot(inst)
+					if err != nil {
+						b.Fatal(err)
+					}
+					inst.Release()
+
+					for j := 0; j < k; j++ {
+						f, err := rt.Restore(b.Context(), snap)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if _, err := f.Eval(b.Context(), code); err != nil {
+							f.Release()
+							b.Fatal(err)
+						}
+						f.Release()
+					}
+
+					rt.Close(b.Context())
+				}
+				b.StopTimer()
+
+				if iters > 0 {
+					perBranch := float64(b.Elapsed().Nanoseconds()) / float64(iters*k)
+					b.ReportMetric(perBranch, "ns/branch-amortized")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkAcquire_PoolExhausted(b *testing.B) {
+	const poolSize = 4
+	rt := newRuntime(b, sango.WithPoolSize(poolSize))
+
+	held := make([]releaser, 0, poolSize)
+	for i := 0; i < poolSize; i++ {
+		inst, err := rt.Acquire(b.Context())
+		if err != nil {
+			b.Fatal(err)
+		}
+		held = append(held, inst)
+	}
+	b.Cleanup(func() {
+		for _, h := range held {
+			h.Release()
+		}
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		inst, err := rt.Acquire(b.Context())
+		if err != nil {
+			b.Fatal(err)
 		}
 		inst.Release()
 	}

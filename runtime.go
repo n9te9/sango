@@ -20,6 +20,7 @@ type Runtime struct {
 	moduleHash      [32]byte
 	closed          atomic.Bool
 	moduleConfigMod func(wazero.ModuleConfig) wazero.ModuleConfig
+	ownedCache      wazero.CompilationCache
 
 	golden Snapshot
 	warm   chan *Instance
@@ -28,9 +29,13 @@ type Runtime struct {
 type Option func(*config)
 
 type config struct {
-	poolSize        int
-	wasi            bool
-	moduleConfigMod func(wazero.ModuleConfig) wazero.ModuleConfig
+	poolSize            int
+	wasi                bool
+	moduleConfigMod     func(wazero.ModuleConfig) wazero.ModuleConfig
+	compilationCache    wazero.CompilationCache
+	compilationCacheDir string
+	compilationWorkers  int
+	forkParallelism     int
 }
 
 func WithPoolSize(n int) Option { return func(c *config) { c.poolSize = n } }
@@ -44,23 +49,60 @@ func WithModuleConfigModifier(f func(wazero.ModuleConfig) wazero.ModuleConfig) O
 	return func(c *config) { c.moduleConfigMod = f }
 }
 
+func WithCompilationCache(cache wazero.CompilationCache) Option {
+	return func(c *config) { c.compilationCache = cache }
+}
+
+func WithCompilationCacheDir(dir string) Option {
+	return func(c *config) { c.compilationCacheDir = dir }
+}
+
+func WithCompilationWorkers(n int) Option {
+	return func(c *config) { c.compilationWorkers = n }
+}
+
+func WithForkParallelism(n int) Option {
+	return func(c *config) { c.forkParallelism = n }
+}
+
 func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option) (*Runtime, error) {
 	cfg := &config{}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	wrt := wazero.NewRuntimeWithConfig(ctx,
-		wazero.NewRuntimeConfig().
-			WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesExceptionHandling))
+	cache := cfg.compilationCache
+	cacheOwned := false
+	if cache == nil && cfg.compilationCacheDir != "" {
+		c, err := wazero.NewCompilationCacheWithDir(cfg.compilationCacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("sango: open compilation cache dir %q: %w", cfg.compilationCacheDir, err)
+		}
+		cache = c
+		cacheOwned = true
+	}
+
+	rtCfg := wazero.NewRuntimeConfig().
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+	if cache != nil {
+		rtCfg = rtCfg.WithCompilationCache(cache)
+	}
+	wrt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
 	if cfg.wasi {
 		wasi_snapshot_preview1.MustInstantiate(ctx, wrt)
 	}
 
-	compiled, err := wrt.CompileModule(ctx, wasmBinary)
+	compileCtx := ctx
+	if cfg.compilationWorkers > 0 {
+		compileCtx = experimental.WithCompilationWorkers(ctx, cfg.compilationWorkers)
+	}
+	compiled, err := wrt.CompileModule(compileCtx, wasmBinary)
 	if err != nil {
 		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
 		return nil, fmt.Errorf("sango: compile module: %w", err)
 	}
 
@@ -72,21 +114,33 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 		moduleConfigMod: cfg.moduleConfigMod,
 		warm:            make(chan *Instance, max(cfg.poolSize, 1)),
 	}
+	if cacheOwned {
+		rt.ownedCache = cache
+	}
 
 	seed, err := rt.instantiate(ctx)
 	if err != nil {
 		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
 		return nil, err
 	}
 	if err := adapter.Initialize(ctx, seed.mod); err != nil {
 		seed.Release()
 		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
 		return nil, fmt.Errorf("sango: adapter initialize: %w", err)
 	}
 	golden, err := rt.Snapshot(seed)
 	if err != nil {
 		seed.Release()
 		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
 		return nil, fmt.Errorf("sango: golden snapshot: %w", err)
 	}
 	rt.golden = golden
@@ -146,14 +200,24 @@ func (r *Runtime) Restore(ctx context.Context, s Snapshot) (*Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := r.checkSnapshotIdentity(adapterID, hash); err != nil {
+		return nil, err
+	}
+	return r.restoreDecoded(ctx, memory)
+}
+
+func (r *Runtime) checkSnapshotIdentity(adapterID string, hash [32]byte) error {
 	if adapterID != r.adapter.ID() {
-		return nil, fmt.Errorf("sango: snapshot adapter %q does not match runtime adapter %q",
+		return fmt.Errorf("sango: snapshot adapter %q does not match runtime adapter %q",
 			adapterID, r.adapter.ID())
 	}
 	if hash != r.moduleHash {
-		return nil, fmt.Errorf("sango: snapshot was taken on a different wasm module build")
+		return fmt.Errorf("sango: snapshot was taken on a different wasm module build")
 	}
+	return nil
+}
 
+func (r *Runtime) restoreDecoded(ctx context.Context, memory []byte) (*Instance, error) {
 	inst, err := r.instantiate(ctx)
 	if err != nil {
 		return nil, err
@@ -182,7 +246,14 @@ func (r *Runtime) Close(ctx context.Context) error {
 		case inst := <-r.warm:
 			inst.Release()
 		default:
-			return r.wazeroRT.Close(ctx)
+			err := r.wazeroRT.Close(ctx)
+			if r.ownedCache != nil {
+				if cerr := r.ownedCache.Close(ctx); cerr != nil && err == nil {
+					err = cerr
+				}
+				r.ownedCache = nil
+			}
+			return err
 		}
 	}
 }
