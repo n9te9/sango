@@ -253,7 +253,7 @@ $(NUMPY_INC_STAMP): $(NUMPY_BUILDDIR)/build.ninja
 	@src=$$(find $(NUMPY_BUILDDIR) -name '_numpyconfig.h' | head -1); \
 	 if [ -z "$$src" ]; then \
 	   echo "ERROR: _numpyconfig.h not found under $(NUMPY_BUILDDIR)"; \
-	   echo "  try: make numpy-configure  (meson setup --reconfigure が必要かもしれません)"; \
+	   echo "  try: make numpy-configure  (meson setup --reconfigure)"; \
 	   exit 1; \
 	 fi; \
 	 cp "$$src" $(NUMPY_INC)/numpy/; \
