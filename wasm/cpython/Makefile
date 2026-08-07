@@ -457,12 +457,10 @@ $(OUT): $(CC) $(CPY_INSTALL) sango_cpython.c sango_run.h sango_cpython_pandas.h 
 	  $$(find $(CPY_HACL) -name '*.o' 2>/dev/null) \
 	  $(EXT_OBJS) \
 		$$(find $(NUMPY_BUILDDIR) -name '*.o' -path '*.so.p/*' \
-	     ! -path '*tests*' ! -path '*_simd*' \
-	     ! -path '*_umath_linalg*lapack_lite_f2c*' \
-	     ! -path '*_umath_linalg*lapack_lite_python_xerbla*' 2>/dev/null) \
-		$(NUMPY_BUILDDIR)/numpy/_core/libnpymath.a \
+	     ! -path '*tests*' ! -path '*_simd*' 2>/dev/null) \
 		$$(find $(PANDAS_BUILDDIR) -name '*.o' -path '*.so.p/*' \
 	     ! -path '*tests*' 2>/dev/null) \
+	  $(NUMPY_BUILDDIR)/numpy/_core/libnpymath.a \
 	  $(NUMPY_BUILDDIR)/numpy/_core/lib_multiarray_umath_mtargets.a \
 	  $(NUMPY_BUILDDIR)/numpy/_core/libhighway.a \
 	  $(NUMPY_BUILDDIR)/numpy/random/libnpyrandom.a \
