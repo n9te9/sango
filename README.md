@@ -4,24 +4,25 @@
 
 sango runs untrusted, LLM-generated JavaScript and Python inside a WebAssembly
 linear memory on your Go heap. Instances are handed out from a pre-initialized
-pool in microseconds, and any execution state can be snapshotted, restored,
-and **forked** — turning tree search, speculative execution, and
+pool in about a millisecond, and any execution state can be snapshotted,
+restored, and **forked** — turning tree search, speculative execution, and
 pause/resume into cheap memory operations.
 
 ```
-Apple M4 Max                    CPython 3.13 (numpy + pandas linked in)
+Apple M2 Pro                    CPython 3.13 (numpy + pandas linked in)
 ──────────────────────────────────────────────────────────────────────
-Eval   1 + 1                     33 µs
-Eval   json.dumps                70 µs
-Eval   numpy, 1M-element sum    438 µs
-Acquire   from a warm pool      877 µs   / 39 MB, 76k allocs
-Acquire   with no pool          2.2 ms
-Fork      restore a snapshot    2.3 ms
-Fork      restore a numpy set   2.4 ms
-Snapshot                        441 µs   / 19.4 MB
-Snapshot  after import numpy    605 µs   / 26.0 MB
-import numpy   (per session)    372 ms   ← see "Keep the import off the request path"
-Cold init      (once, at New)   7.6 s    (single sample; use -benchtime 5x)
+Eval   1 + 1                     47 µs
+Eval   json.dumps               106 µs
+Eval   numpy, 1M-element sum    587 µs
+Acquire   from a warm pool      1.43 ms  / 39.6 MB, 76k allocs
+Acquire   with no pool          3.52 ms
+Fork      restore a snapshot    3.32 ms
+Fork      restore a numpy set   3.93 ms
+Snapshot                        751 µs   / 19.4 MB
+Snapshot  after import numpy    1.04 ms  / 26.0 MB
+import numpy   (per session)    523 ms   ← see "Keep the import off the request path"
+Cold init      (once, at New)   ~10 s    (single samples, 10.0–11.1 s)
+Cold init      (cached)         916 ms   ← see "Cache the compilation"
 
 Apple M2 Pro                    QuickJS
 ──────────────────────────────────────────────────────────────────────
@@ -32,9 +33,7 @@ Snapshot                         72 µs / 1.3 MB
 Cold init  (paid once, at New)   264 ms
 ```
 
-The QuickJS column has not been re-measured on the same machine as the CPython
-column; do not compare rows across the two tables.
-
+All numbers were measured on the same Apple M2 Pro.
 Reproduce with `go test -bench . -benchmem -run '^$' ./adapter/...`.
 
 ## Why
@@ -53,12 +52,11 @@ execution state is a `[]byte` of linear memory*:
    no syscalls unless you explicitly grant them (default deny). Every
    `Acquire` starts from a pristine golden snapshot; `Release` destroys the
    instance. Nothing survives between sessions.
-2. **Sub-millisecond provisioning from a warm pool.** Interpreter
+2. **Millisecond provisioning from a warm pool.** Interpreter
    initialization runs once, at `New`. The resulting memory image is the
    *golden snapshot* (think: base image). A warm `Acquire` copies that image
-   at roughly memcpy speed — 877 µs for a 19 MB CPython image, ~8,600×
-   cheaper than the 7.6 s cold init, and fast enough to sit on a web request
-   path.
+   at memcpy speed — 1.43 ms for a 19 MB CPython image, ~7,000× cheaper
+   than the ~10 s cold init, and fast enough to sit on a web request path.
 3. **Execution state as a value.** `Snapshot` returns bytes you can store,
    ship, and `Restore` into as many forks as you like. Branch an agent's
    session, try candidates in parallel, keep the winner, discard the rest.
@@ -124,7 +122,7 @@ if !res.OK()        { /* the code was wrong: send res.Err to the LLM */ }
 
 ## Keep the import off the request path
 
-`import numpy` costs **372 ms** on a fresh instance. That is container
+`import numpy` costs **523 ms** on a fresh instance. That is container
 latency, and it is paid by every session that touches numpy. It is also
 entirely avoidable: import once at startup, snapshot, and `Restore` per
 session instead of `Acquire`.
@@ -136,17 +134,34 @@ base, _ := rt.Snapshot(warm)   // 26 MB with numpy imported
 warm.Release()
 
 // per session, forever after:
-sess, _ := rt.Restore(ctx, base)   // 2.4 ms — 152× cheaper than re-importing
+sess, _ := rt.Restore(ctx, base)   // 3.93 ms — 133× cheaper than re-importing
 defer sess.Release()
 ```
 
-Restore scales sub-linearly with image size: growing the snapshot from 19.4 MB
-to 26.0 MB (+34%) costs only +8% in restore time, because a fixed
-instantiation cost dominates. Pre-importing is close to free; re-importing is
-not.
+Restore scales sub-linearly with image size: growing the snapshot from
+19.4 MB to 26.0 MB (+34%) costs +18% in restore time, because a fixed
+instantiation cost dominates. Pre-importing is close to free; re-importing
+is not.
 
 If your workload is stdlib-only, plain `Acquire` remains the fast path at
-877 µs and there is nothing to do.
+1.43 ms and there is nothing to do.
+
+## Cache the compilation
+
+Cold init is dominated by wazero compiling the wasm module, and wazero can
+cache the compiled form on disk:
+
+```go
+rt, _ := sango.New(ctx, cpython.Wasm(), cpython.CPython(),
+	sango.WithWASI(), stdlib,
+	sango.WithCompilationCacheDir(cacheDir))
+```
+
+The first `New` pays the full ~10 s and writes the cache. Every later `New`
+— including in a freshly started process — reads it back in **916 ms**, an
+11× cut. If your deployment restarts processes at all, use this; it turns
+"call `New` once at startup, never lazily" from a hard requirement into a
+mild preference.
 
 ## Fork
 
@@ -166,15 +181,18 @@ everything lives in the linear memory. `examples/03-tree` runs the same
 search tree with and without fork; at depth 6 the fork strategy does
 **5.1× fewer evals in 5.1× less wall time**, and the gap grows with depth.
 
-For Python the argument is sharper than for JS. A fork costs 2.3 ms, so
+For Python the argument is sharper than for JS. A fork costs 3.3 ms, so
 forking beats re-execution whenever replaying the session costs more than
-that — and any session with a scientific import already costs 372 ms to
+that — and any session with a scientific import already costs 523 ms to
 replay. Fork is how a numpy session stops being expensive.
 
-Fan-out is flat up to about 16 concurrent live forks (≈2.2 ms per branch at
-widths 1, 4 and 16) and degrades beyond it (≈5.0 ms per branch at width 64,
-with 2.5 GB of allocation churn per round). Bound your live branch width;
-release forks as soon as a candidate loses.
+Fan-out cost depends on whether forks stay alive. Forks that are created,
+used, and released are flat: 3.4–3.5 ms per fork whether you make 10 or
+1,000 of them. Forks held live are a memory question: each one keeps its own
+39.6 MB of linear memory, nothing is shared, and a thousand live forks hold
+39.6 GB while per-fork time degrades to ~13 ms under the GC pressure.
+Release forks as soon as a candidate loses; bound your *live* width, not
+your total fork count.
 
 Snapshots carry a header (adapter ID + wasm build hash) and restoring one
 against the wrong runtime is rejected explicitly rather than corrupting
@@ -184,24 +202,26 @@ silently.
 
 The numbers that determine whether sango fits your workload:
 
-- **Copying dominates.** Snapshot runs at ~44 GB/s and a warm `Acquire` at
-  ~45 GB/s — both at single-core memcpy speed on this machine. The only
-  lever on provisioning latency is a smaller image.
-- **The pool hides ~1.3 ms of instantiation.** A cold `Acquire` (2.2 ms) and
-  a `Restore` (2.3 ms) both run at ~18 GB/s effective, versus 45 GB/s warm.
-  The work is not eliminated by pooling, only moved off the critical path —
-  which is why `Restore`, having no pool behind it, is slower than a warm
+- **Copying dominates.** Snapshot runs at 25–28 GB/s — single-core memcpy
+  speed on this machine. The only lever on provisioning latency is a
+  smaller image.
+- **The pool hides ~2 ms of instantiation.** A cold `Acquire` (3.52 ms) does
+  the same copy as a warm one (1.43 ms) plus instantiation. The work is not
+  eliminated by pooling, only moved off the critical path — which is why
+  `Restore` (3.32 ms), having no pool behind it, is slower than a warm
   `Acquire`.
-- **Acquire does not scale with cores.** 1,140 acquires/s serial, 1,732/s
-  across 14 cores — a 1.5× speedup. Each acquire costs ~39 MB and ~76k
-  allocations, so throughput is bounded by memory bandwidth and GC, not by
-  parallelism. Size your pool for latency, not for throughput, and expect a
-  low four-figure ceiling per process.
-- **Cold init is 7.6 s.** Call `New` at process startup, never lazily on a
-  request. This figure is a single sample; re-measure with `-benchtime 5x`
-  if it matters to you.
-- **numpy in wasm is scalar.** The 128×128 matmul runs at ~2.1 GFLOPS and a
-  1M-element sum at ~18 GB/s — no SIMD, no BLAS. Correct, portable, and one
+- **Acquire does not scale with cores.** ~700 acquires/s serial, and no gain
+  from running acquires in parallel (1.52 ms/op across 12 cores vs 1.43 ms
+  serial). Each acquire costs ~39.6 MB and ~76k allocations, so throughput
+  is bounded by memory bandwidth and GC, not by parallelism. Fork-and-eval
+  *does* parallelize — 3.5 ms serial vs 1.5 ms/op across cores — because
+  the eval work overlaps. Size your pool for latency, not for throughput.
+- **Cold init is ~10 s uncached, 916 ms cached.** Call `New` at process
+  startup and pass `WithCompilationCacheDir`. The uncached figure comes
+  from single samples (10.0–11.1 s); re-measure with `-benchtime 5x` if it
+  matters to you.
+- **numpy in wasm is scalar.** The 128×128 matmul runs at ~1.5 GFLOPS and a
+  1M-element sum at ~14 GB/s — no SIMD, no BLAS. Correct, portable, and one
   to two orders of magnitude off native. Use it for the analysis an agent
   actually writes, not for numerical throughput.
 
@@ -231,8 +251,12 @@ The numbers that determine whether sango fits your workload:
 - **One Python build, numpy and pandas included.** There is no stdlib-only
   variant; every CPython user carries the scientific stack. That buys a
   single supported configuration and no build matrix, and it costs binary
-  size, a 7.6 s cold init, and a 19 MB baseline image that every acquire
-  copies.
+  size, a ~10 s uncached cold init, and a 19 MB baseline image that every
+  acquire copies.
+- **Forks don't share memory.** Every live fork is a full copy of its
+  linear memory. There is no copy-on-write between forks today, so
+  concurrent live forks cost 39.6 MB each — plan capacity around live
+  width, and release aggressively.
 - **Packages are chosen at build time, not by pip.** Pure-Python modules can
   be added to the VFS; anything with a compiled component means building
   your own wasm. If you need arbitrary `pip install` at runtime, a remote
