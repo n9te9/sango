@@ -322,9 +322,6 @@ where your LLM call plugs in.
   the in-process fast path for the other 80% of executions.
 - **langchain quickjs-rs** — the same linear-memory-snapshot insight,
   Python/Rust ecosystem, built for pause/resume of Deep Agents.
-- **goccy/wasmify** — compiles *trusted* C/C++ libraries into Go packages
-  via wasm (build-time import). sango runs *untrusted* code arriving at
-  runtime (execution quarantine). Same port, opposite cargo.
 - **wazero** — the pure-Go wasm runtime sango stands on.
 
 ## Status
