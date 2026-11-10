@@ -82,8 +82,12 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 		cacheOwned = true
 	}
 
+	// WithCloseOnContextDone makes a cancelled or expired ctx interrupt a
+	// running guest. Without it wazero ignores ctx during execution and an
+	// infinite loop in untrusted code never returns from Eval.
 	rtCfg := wazero.NewRuntimeConfig().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+		WithCloseOnContextDone(true)
 	if cache != nil {
 		rtCfg = rtCfg.WithCompilationCache(cache)
 	}

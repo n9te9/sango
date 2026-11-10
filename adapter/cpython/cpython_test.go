@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/n9te9/sango"
@@ -695,4 +696,35 @@ func TestNumpy_FFT(t *testing.T) {
 			t.Fatalf("instance broken after exception: got %s", got)
 		}
 	})
+}
+
+func TestRealWasm_EvalInterruptedByContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+	rt := newExtRuntime(t)
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := inst.Eval(ctx, []byte("while True: pass"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from an interrupted eval, got nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("infinite loop was not interrupted by context deadline")
+	}
 }
