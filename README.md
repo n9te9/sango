@@ -272,7 +272,9 @@ The numbers that determine whether sango fits your workload:
 - **Sizes.** QuickJS adds ~1 MB to your binary; CPython with numpy and
   pandas adds TBD. They are separate packages — import only what you use.
 - **Long-running / adversarial code.** Use `context` deadlines on `Eval`
-  (wazero interrupts on cancellation) and memory limits for hostile guests.
+  (wazero interrupts on cancellation) and `WithMemoryLimitPages` to cap each
+  guest's linear memory (otherwise a guest may grow to the wasm32 limit of
+  4 GiB). Size the cap above your largest snapshot.
   Native code sections interrupt at coarser granularity than Python
   bytecode: a long ndarray operation is stopped by terminating the instance,
   not by raising into the guest. Hardening options are being expanded — see

@@ -475,3 +475,42 @@ func TestRealWasm_EvalInterruptedByContext(t *testing.T) {
 		t.Fatalf("got %q / %v", res.Value, res.Err)
 	}
 }
+
+func TestRealWasm_MemoryLimitPages(t *testing.T) {
+	// 1024 pages = 64 MiB cap on linear memory.
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(),
+		sango.WithWASI(), sango.WithMemoryLimitPages(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	// 256 MiB does not fit under the cap.
+	res, err := inst.Eval(t.Context(), []byte(`new ArrayBuffer(256 * 1024 * 1024).byteLength`))
+	if err != nil {
+		t.Fatalf("want guest error, got infra error: %v", err)
+	}
+	if res.OK() {
+		t.Fatalf("allocation beyond the memory limit succeeded: %q", res.Value)
+	}
+
+	// The runtime keeps serving clean instances.
+	next, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Release()
+	res, err = next.Eval(t.Context(), []byte(`1 + 1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() || string(res.Value) != "2" {
+		t.Fatalf("got %q / %v", res.Value, res.Err)
+	}
+}
