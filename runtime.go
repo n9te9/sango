@@ -36,6 +36,8 @@ type config struct {
 	compilationCacheDir string
 	compilationWorkers  int
 	forkParallelism     int
+	memoryLimitPages    uint32
+	hostFuncs           map[string]HostFunc
 }
 
 func WithPoolSize(n int) Option { return func(c *config) { c.poolSize = n } }
@@ -65,6 +67,16 @@ func WithForkParallelism(n int) Option {
 	return func(c *config) { c.forkParallelism = n }
 }
 
+// WithMemoryLimitPages caps each guest's linear memory at n wasm pages
+// (64 KiB each). A guest that tries to grow past the cap sees an allocation
+// failure (e.g. MemoryError in Python) instead of consuming host memory up to
+// the wasm32 limit of 4 GiB. The cap must be large enough to hold the golden
+// snapshot and any snapshot passed to Restore; New fails if the module's
+// initial memory does not fit. Zero (the default) leaves wazero's limit.
+func WithMemoryLimitPages(n uint32) Option {
+	return func(c *config) { c.memoryLimitPages = n }
+}
+
 func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option) (*Runtime, error) {
 	cfg := &config{}
 	for _, o := range opts {
@@ -82,8 +94,15 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 		cacheOwned = true
 	}
 
+	// WithCloseOnContextDone makes a cancelled or expired ctx interrupt a
+	// running guest. Without it wazero ignores ctx during execution and an
+	// infinite loop in untrusted code never returns from Eval.
 	rtCfg := wazero.NewRuntimeConfig().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+		WithCloseOnContextDone(true)
+	if cfg.memoryLimitPages > 0 {
+		rtCfg = rtCfg.WithMemoryLimitPages(cfg.memoryLimitPages)
+	}
 	if cache != nil {
 		rtCfg = rtCfg.WithCompilationCache(cache)
 	}
@@ -91,6 +110,13 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 
 	if cfg.wasi {
 		wasi_snapshot_preview1.MustInstantiate(ctx, wrt)
+	}
+	if err := instantiateHostModule(ctx, wrt, cfg.hostFuncs); err != nil {
+		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
+		return nil, err
 	}
 
 	compileCtx := ctx

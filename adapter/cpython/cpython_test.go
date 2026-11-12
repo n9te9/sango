@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/n9te9/sango"
@@ -695,4 +696,77 @@ func TestNumpy_FFT(t *testing.T) {
 			t.Fatalf("instance broken after exception: got %s", got)
 		}
 	})
+}
+
+func TestRealWasm_EvalInterruptedByContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+	rt := newExtRuntime(t)
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := inst.Eval(ctx, []byte("while True: pass"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from an interrupted eval, got nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("infinite loop was not interrupted by context deadline")
+	}
+}
+
+func TestRealWasm_MemoryLimitPages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip real wasm test in -short mode")
+	}
+	opt, err := cpython.WithStdlib()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2048 pages = 128 MiB cap on linear memory.
+	rt, err := sango.New(t.Context(), cpython.Wasm(), cpython.CPython(),
+		sango.WithWASI(), opt, sango.WithMemoryLimitPages(2048))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	// 1 GiB does not fit under the cap.
+	// It surfaces as a guest error (MemoryError), not an infra error.
+	res, err := inst.Eval(t.Context(), []byte(`len(bytearray(1024 * 1024 * 1024))`))
+	if err != nil {
+		t.Fatalf("want guest error, got infra error: %v", err)
+	}
+	if res.OK() {
+		t.Fatalf("allocation beyond the memory limit succeeded: %q", res.Value)
+	}
+
+	// The same instance stays usable after the failed allocation.
+	res, err = inst.Eval(t.Context(), []byte(`1 + 1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() || string(res.Value) != "2" {
+		t.Fatalf("got %q / %v", res.Value, res.Err)
+	}
 }

@@ -21,6 +21,56 @@ void deallocate(void *ptr, size_t size) {
     free(ptr);
 }
 
+/* ホストが貸した関数を呼ぶ import。ゲストにネットワークやファイルはなく、
+ * 外の世界に届く経路はホストが WithHostFunc で登録した関数だけになる。
+ * 戻り値は (ptr << 32 | len)。buf[0] がタグ、以降がペイロード。
+ * buf はホストがゲストの allocate で確保するので、ゲストが free する。 */
+__attribute__((import_module("sango"), import_name("call")))
+extern uint64_t sango_host_call(const char *name, uint32_t name_len,
+                                const char *arg, uint32_t arg_len);
+
+/* JS: sango.call(name: string, arg?: string): string */
+static JSValue js_sango_call(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "sango.call: name is required");
+
+    size_t name_len, arg_len = 0;
+    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    const char *arg = "";
+    if (argc >= 2 && !JS_IsUndefined(argv[1])) {
+        arg = JS_ToCStringLen(ctx, &arg_len, argv[1]);
+        if (!arg) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+    }
+
+    uint64_t r = sango_host_call(name, (uint32_t)name_len, arg, (uint32_t)arg_len);
+    JS_FreeCString(ctx, name);
+    if (argc >= 2 && !JS_IsUndefined(argv[1])) JS_FreeCString(ctx, arg);
+
+    uint8_t *buf = (uint8_t *)(uintptr_t)(uint32_t)(r >> 32);
+    uint32_t len = (uint32_t)r;
+    if (!buf || len == 0) return JS_ThrowInternalError(ctx, "sango.call: host call failed");
+
+    JSValue ret;
+    if (buf[0] == TAG_OK) {
+        ret = JS_NewStringLen(ctx, (const char *)buf + 1, len - 1);
+    } else {
+        ret = JS_ThrowInternalError(ctx, "%.*s", (int)(len - 1), (const char *)buf + 1);
+    }
+    free(buf);
+    return ret;
+}
+
+static int install_host_bindings(JSContext *ctx) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "call", JS_NewCFunction(ctx, js_sango_call, "call", 2));
+    int rc = JS_SetPropertyStr(ctx, global, "sango", obj);
+    JS_FreeValue(ctx, global);
+    return rc < 0 ? -1 : 0;
+}
+
 __attribute__((export_name("initialize")))
 uint32_t initialize(void) {
     g_rt = JS_NewRuntime();
@@ -30,6 +80,8 @@ uint32_t initialize(void) {
  
     g_ctx = JS_NewContext(g_rt);
     if (!g_ctx) return 2;
+
+    if (install_host_bindings(g_ctx) != 0) return 3;
     
     return 0;
 }

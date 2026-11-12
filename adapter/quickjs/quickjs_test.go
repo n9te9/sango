@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/n9te9/sango"
@@ -430,4 +431,209 @@ func TestQuickJS_KnownLimitations(t *testing.T) {
 		}
 		t.Logf("traps as expected: %v", err)
 	})
+}
+
+func TestRealWasm_EvalInterruptedByContext(t *testing.T) {
+	rt := newQuickJSRuntime(t)
+	defer rt.Close(t.Context())
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := inst.Eval(ctx, []byte(`for (;;) {}`))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from an interrupted eval, got nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("infinite loop was not interrupted by context deadline")
+	}
+
+	// The runtime keeps serving clean instances after an interrupt.
+	next, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Release()
+	res, err := next.Eval(t.Context(), []byte(`1 + 1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() || string(res.Value) != "2" {
+		t.Fatalf("got %q / %v", res.Value, res.Err)
+	}
+}
+
+func TestRealWasm_MemoryLimitPages(t *testing.T) {
+	// 1024 pages = 64 MiB cap on linear memory.
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(),
+		sango.WithWASI(), sango.WithMemoryLimitPages(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	// 256 MiB does not fit under the cap.
+	res, err := inst.Eval(t.Context(), []byte(`new ArrayBuffer(256 * 1024 * 1024).byteLength`))
+	if err != nil {
+		t.Fatalf("want guest error, got infra error: %v", err)
+	}
+	if res.OK() {
+		t.Fatalf("allocation beyond the memory limit succeeded: %q", res.Value)
+	}
+
+	// The runtime keeps serving clean instances.
+	next, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Release()
+	res, err = next.Eval(t.Context(), []byte(`1 + 1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() || string(res.Value) != "2" {
+		t.Fatalf("got %q / %v", res.Value, res.Err)
+	}
+}
+
+func TestRealWasm_HostFunc(t *testing.T) {
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(),
+		sango.WithWASI(),
+		sango.WithHostFunc("echo", func(ctx context.Context, arg []byte) ([]byte, error) {
+			return append([]byte("echo:"), arg...), nil
+		}),
+		sango.WithHostFunc("fail", func(ctx context.Context, arg []byte) ([]byte, error) {
+			return nil, errors.New("upstream returned 503")
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	tests := []struct {
+		name    string
+		code    string
+		want    string
+		wantErr string
+	}{
+		{name: "registered function returns a value", code: `sango.call("echo", JSON.stringify({city: "Tokyo"}))`, want: `echo:{"city":"Tokyo"}`},
+		{name: "argument is optional", code: `sango.call("echo")`, want: `echo:`},
+		{name: "host error becomes a guest exception", code: `try { sango.call("fail", "") } catch (e) { "caught: " + e.message }`, want: "caught: upstream returned 503"},
+		{name: "unregistered function is unreachable", code: `sango.call("fetch", "https://example.com")`, wantErr: `host function "fetch" is not provided`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inst, err := rt.Acquire(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inst.Release()
+			res, err := inst.Eval(t.Context(), []byte(tt.code))
+			if err != nil {
+				t.Fatalf("infra error: %v", err)
+			}
+			if tt.wantErr != "" {
+				if res.OK() || !bytes.Contains(res.Err.Message, []byte(tt.wantErr)) {
+					t.Fatalf("want error containing %q, got %q / %v", tt.wantErr, res.Value, res.Err)
+				}
+				return
+			}
+			if !res.OK() {
+				t.Fatalf("guest error: %v", res.Err)
+			}
+			if diff := cmp.Diff(tt.want, string(res.Value)); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRealWasm_HostFuncRespectsEvalDeadline(t *testing.T) {
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(),
+		sango.WithWASI(),
+		sango.WithHostFunc("slow", func(ctx context.Context, arg []byte) ([]byte, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(10 * time.Second):
+				return []byte("too late"), nil
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+	inst, err := rt.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	res, err := inst.Eval(ctx, []byte(`sango.call("slow")`))
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("host call was not bounded by the eval deadline")
+	}
+	if err == nil && res.OK() {
+		t.Fatalf("expected failure, got %q", res.Value)
+	}
+}
+
+type principalKey struct{}
+
+func TestRealWasm_HostFuncReceivesEvalContextValues(t *testing.T) {
+	rt, err := sango.New(t.Context(), quickjs.Wasm(), quickjs.QuickJS(),
+		sango.WithWASI(),
+		sango.WithHostFunc("whoami", func(ctx context.Context, arg []byte) ([]byte, error) {
+			user, ok := ctx.Value(principalKey{}).(string)
+			if !ok {
+				return nil, errors.New("no principal")
+			}
+			return []byte(user), nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(t.Context())
+
+	for _, user := range []string{"alice", "bob"} {
+		inst, err := rt.Acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.WithValue(t.Context(), principalKey{}, user)
+		// The guest cannot choose whose identity the host function sees.
+		res, err := inst.Eval(ctx, []byte(`sango.call("whoami", JSON.stringify({user: "admin"}))`))
+		inst.Release()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.OK() || string(res.Value) != user {
+			t.Fatalf("want %q, got %q / %v", user, res.Value, res.Err)
+		}
+	}
 }
