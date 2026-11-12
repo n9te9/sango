@@ -37,6 +37,7 @@ type config struct {
 	compilationWorkers  int
 	forkParallelism     int
 	memoryLimitPages    uint32
+	hostFuncs           map[string]HostFunc
 }
 
 func WithPoolSize(n int) Option { return func(c *config) { c.poolSize = n } }
@@ -109,6 +110,13 @@ func New(ctx context.Context, wasmBinary []byte, adapter Adapter, opts ...Option
 
 	if cfg.wasi {
 		wasi_snapshot_preview1.MustInstantiate(ctx, wrt)
+	}
+	if err := instantiateHostModule(ctx, wrt, cfg.hostFuncs); err != nil {
+		wrt.Close(ctx)
+		if cacheOwned {
+			cache.Close(ctx)
+		}
+		return nil, err
 	}
 
 	compileCtx := ctx

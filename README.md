@@ -198,6 +198,31 @@ Snapshots carry a header (adapter ID + wasm build hash) and restoring one
 against the wrong runtime is rejected explicitly rather than corrupting
 silently.
 
+## Lend host functions
+
+A guest has no network of its own. To let agent code reach an API, lend it a
+function. The guest sees one import, `sango.call(name, arg)`, and can reach
+only the names you register; anything else throws.
+
+```go
+rt, _ := sango.New(ctx, quickjs.Wasm(), quickjs.QuickJS(), sango.WithWASI(),
+	sango.WithHostFunc("weather", func(ctx context.Context, arg []byte) ([]byte, error) {
+		// Runs in the host: the API key and the policy stay here.
+		return fetchForecast(ctx, arg)
+	}))
+```
+
+```js
+// guest (QuickJS)
+const f = JSON.parse(sango.call("weather", JSON.stringify({city: "Tokyo"})));
+f.days.filter(d => d.rain >= 50).map(d => d.date)
+```
+
+The `ctx` passed to `Eval` reaches the host function, so its deadline bounds
+the call and its values can carry the requesting user. Decide whose authority
+a call runs with from `ctx`, never from the guest's argument — the argument is
+written by untrusted code. Only QuickJS exposes `sango.call` today.
+
 ## Cost model
 
 The numbers that determine whether sango fits your workload:
@@ -233,6 +258,10 @@ The numbers that determine whether sango fits your workload:
   `WithWASI()` grants only the benign syscall surface (clock, random) that
   wasi-libc needs. The CPython stdlib is mounted read-only from an embedded
   zip — the host filesystem is never touched.
+- **Host functions are the only window out.** A guest reaches the outside
+  world only through functions registered with `WithHostFunc`. Each one is
+  attack surface: validate its argument and authorize with the identity in
+  `ctx`, not one the guest supplies.
 - QuickJS is built **without** `quickjs-libc` (no `std`/`os` modules): the
   guest lacks even the vocabulary to reach for files or processes.
 - Every `Acquire` starts from the golden snapshot; instances are destroyed
